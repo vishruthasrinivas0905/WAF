@@ -1,8 +1,5 @@
-"""
-WAF NEURAL INFERENCE ENGINE
-Module: waf/inference/__init__.py
-"""
+"""Prototype request scoring utilities."""
 
-from .model_engine import WafNeuralScorer, create_default_scorer
+from .model_engine import WafHeuristicScorer, WafNeuralScorer, create_default_scorer
 
-__all__ = ["WafNeuralScorer", "create_default_scorer"]
+__all__ = ["WafHeuristicScorer", "WafNeuralScorer", "create_default_scorer"]

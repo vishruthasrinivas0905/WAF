@@ -1,21 +1,23 @@
-# AppAware-WAF: Application-Aware Transformer Web Application Firewall
+# AppAware-WAF: Application-Aware Web Application Firewall Prototype
 
-A production-oriented, research-grade Web Application Firewall combining bounded request canonicalization, OWASP Core Rule Set (CRS) deterministic validation, a sequence-classification Transformer (DistilBERT), an application-specific profile engine, and a live reverse-proxy gateway.
+An academic prototype for request canonicalization, handwritten attack signatures, heuristic risk scoring, application-profile demonstrations, and a configurable HTTP gateway. It is not a production-validated WAF. The bundled score engine is a lexical/entropy heuristic; this repository does not contain trained Transformer weights or source dataset files.
+
+The `/proxy/*` route returns a clearly labeled mock response when `UPSTREAM_URL` is unset. Set `UPSTREAM_URL` to an explicitly trusted HTTP(S) origin to enable proxying. Management APIs require `WAF_ADMIN_TOKEN` in production. See [DEPLOYMENT.md](DEPLOYMENT.md) and [research/PUBLICATION_READINESS.md](research/PUBLICATION_READINESS.md).
 
 ---
 
-## 1. Executive Summary & Key Results
+## 1. Implemented Components
 
-| Metric / Experiment | Baseline / Unadapted | AppAware Hybrid WAF | Impact / Evidence |
-| :--- | :---: | :---: | :--- |
-| **In-Distribution Test Accuracy** | — | **94.57%** | Evaluated on 27,457 test requests |
-| **Test F1-Score (Experiment A)** | — | **0.9532** | Precision: 99.95%, Recall: 91.09%, ROC-AUC: 0.9904 |
-| **False Negative Rate (FNR)** | 8.91% (1,484 missed by standalone ML) | **0.00%** | Parallel OWASP CRS rule layer intercepts missed vectors |
-| **Out-of-Distribution FPR (Experiment D)** | 14.20% (0 benign samples) | **2.10%** (1,000 samples) | **-85% False Positive Reduction** via few-shot profile adaptation |
-| **Evasion Robustness (Experiment E)** | 63.16% (Direct inspection) | **100.00%** (Canonicalized) | **+36.84% Evasion Resistance** across 19 obfuscated attack vectors |
-| **Train-Test String Contamination** | — | **0.00% (0 / 27,457)** | Rigorously verified zero train-test string leakage |
-| **Median P50 Processing Latency** | 144.71 ms (CPU DistilBERT) | **0.95 ms** | Sub-1ms gateway decision via hybrid multi-signal gating |
-| **Gateway Enforcement Accuracy** | — | **100.0% (20/20 Passed)** | GET, POST, PUT, DELETE across SQLi, XSS, RCE, Traversal, Benign |
+| Component | Current behavior |
+| :--- | :--- |
+| Canonicalization | Bounded URL decoding, path normalization, request parsing |
+| Deterministic inspection | Handwritten regex signatures for common SQLi, XSS, RCE, traversal, and scanner patterns |
+| Additional score | Lexical/entropy heuristic; not a trained neural model or calibrated probability |
+| Application profile | In-memory synthetic sample adaptation for UI demonstration |
+| Gateway | WAF-enforced mock mode by default; configured single-origin proxy when `UPSTREAM_URL` is set |
+| Evaluation | Small handcrafted smoke corpus plus a group-held-out CSV evaluation runner |
+
+Earlier drafts contained dataset-scale scores that cannot be reproduced from this repository because the cited datasets and model checkpoint are absent. Those figures have been removed from the live interface and should not be cited as results.
 
 ---
 
@@ -39,15 +41,15 @@ A production-oriented, research-grade Web Application Firewall combining bounded
                                         ▼
                    ┌─────────────────────────────────────────┐
                    │       DETERMINISTIC SECURITY ENGINE     │
-                   │  (Known CRS signatures, injection patterns)
+                   │  (Handwritten signatures inspired by CRS)
                    └────────────────────┬────────────────────┘
                                         │ (Score: S_det)
                                         ▼
                    ┌─────────────────────────────────────────┐
-                   │       TRANSFORMER DETECTOR ENGINE       │
-                   │   (DistilBERT / MiniLM Tokenizer + Clf) │
+                   │       HEURISTIC SCORER ENGINE           │
+                   │   (Handwritten lexical/entropy rules)   │
                    └────────────────────┬────────────────────┘
-                                        │ (Score: P_ml)
+                                        │ (Heuristic score)
                                         ▼
                    ┌─────────────────────────────────────────┐
                    │      APPLICATION PROFILE EVALUATOR      │
@@ -57,7 +59,7 @@ A production-oriented, research-grade Web Application Firewall combining bounded
                                         ▼
                    ┌─────────────────────────────────────────┐
                    │          RISK & POLICY ENGINE           │
-                   │    Fusion: Risk = f(S_det, P_ml, S_app) │
+                   │    Fusion: Risk = f(S_det, S_heur, S_app)│
                    └────────────────────┬────────────────────┘
                                         │
                  ┌──────────────────────┼──────────────────────┐
@@ -70,36 +72,41 @@ A production-oriented, research-grade Web Application Firewall combining bounded
 
 ---
 
-## 3. Dataset Accounting & Provenance
+## 3. Reproducible Dataset Evaluation
 
-The standardized corpus comprises **183,045 HTTP-request records** collected from five sources:
-* CSIC 2010
-* ECML/PKDD 2007
-* HttpParamsDataset
-* PayloadsAllTheThings
-* Web-Application-Attack-Datasets
+No licensed research dataset or trained checkpoint is included. Start with [the dataset manifest template](research/dataset_manifest.example.json), fill in the source, license, retrieval date, source hash, label method, group field, and model provenance, then evaluate a local CSV without committing licensed data:
 
-### Split Distribution
-* **Train Split (`transformer_train.csv`):** 128,131 rows (77,731 Malicious / 50,400 Benign, 70.0%)
-* **Validation Split (`transformer_val.csv`):** 27,457 rows (16,657 Malicious / 10,800 Benign, 15.0%)
-* **Test Split (`transformer_test.csv`):** 27,457 rows (16,657 Malicious / 10,800 Benign, 15.0%)
-* **Total Class Balance:** 72,000 Benign (39.33%), 111,045 Malicious (60.67%)
-* **Ground Truth Column:** `is_attack` (0 = Benign, 1 = Malicious).
-
-### Benchmark Delimiter Shortcut Learning Discovery
-Sample row inspection of raw dataset records revealed trailing parser metadata stamped by benchmark tools:
-```text
-\n\nnull\n\nEnd - Id: 28966\nStart - Id: 2877\nclass: Valid
+```powershell
+python scripts/evaluate_dataset.py .\private-data\requests.csv --group-column application --category-column category
 ```
-To prevent self-attention shortcut learning, `waf/normalization/canonicalizer.py` strictly strips these non-HTTP annotations before tokenization.
+
+Create canonical-deduplicated train/validation/test CSVs with groups kept intact:
+
+```powershell
+python scripts/create_group_splits.py .\private-data\requests.csv --group-column application --output-dir .\private-data\splits
+```
+
+The split command writes `transformer_train.csv`, `transformer_val.csv`, `transformer_test.csv`, a hash-based `split_assignments.csv`, and a provenance summary. Train using the existing optional training script and supplied dependencies/data:
+
+```powershell
+python scripts/train_transformer.py --data_dir .\private-data\splits --output_dir .\private-model
+```
+
+For group-held-out evaluation, rerun with the same source CSV, group column, sizes, and seed:
+
+```powershell
+python scripts/evaluate_dataset.py .\private-data\requests.csv --group-column application --category-column category --model-scores-csv .\private-model\test_model_scores.csv --model-threshold 0.50
+```
+
+The evaluator uses the same deterministic split procedure, compares rules-only, heuristic-only, and hybrid decisions, reports per-category results, and calculates cluster-bootstrap confidence intervals over test groups. Replace `0.50` with the threshold selected on validation data. `train_transformer.py` writes a test-only model-score sidecar keyed by canonical request SHA-256. The evaluator does not train a Transformer, and its heuristic lane is not a model result. See [PUBLICATION_READINESS.md](research/PUBLICATION_READINESS.md) for requirements and limits.
 
 ---
 
 ## 4. Local Execution & Testing (Windows PowerShell)
 
-Navigate to your project directory:
+Navigate to the cloned project directory:
 ```powershell
-cd "C:\Users\SAHANA KS\OneDrive\Desktop\MAJOR WAF 7"
+cd "C:\path\to\appaware-waf_-transformer-web-application-firewall"
 ```
 
 ### 1. Interactive Manual Attack Testing (CLI Prompt)
@@ -119,16 +126,14 @@ Evaluates all combinations of GET, POST, PUT, DELETE for SQLi, XSS, RCE, Path Tr
 python -m unittest tests/test_waf_pipeline.py
 ```
 
-### 4. Run the Full-Stack Web Console & Reverse Proxy Gateway
+### 4. Run the Full-Stack Console
 ```powershell
 npm run dev
 ```
 Access the dashboard at `http://localhost:3000`:
-* **Live Gateway Console:** Manual request interceptor with real-time telemetry.
-* **Few-Shot Adaptation Tab:** Interactive budget curves (0, 100, 500, 1,000 samples).
-* **Robustness Suite Tab:** Breakdown of the +36.84% evasion resilience improvement.
-* **Dataset & Model Provenance Tab:** Empirical confusion matrix and audit metrics.
-* **Research Manuscript Tab:** Formatted academic manuscript ready for project defense and publication.
+* **Gateway Console:** Manual request inspection and proxy/mock response.
+* **Evidence tabs:** State which results/artifacts are absent and link to the reproducible evaluation workflow.
+* **Management API key:** Enter the configured key in the browser UI when `WAF_ADMIN_TOKEN` is set.
 
 ---
 
@@ -142,23 +147,23 @@ MAJOR WAF 7/
 ├── tsconfig.json                  # TypeScript compiler configuration
 ├── vite.config.ts                 # Vite frontend build pipeline
 ├── index.html                     # Web application entry point
-├── server.ts                      # Express API backend & Live WAF Reverse Proxy Gateway
+├── server.ts                      # Express API, authenticated management, and configured-origin gateway
 │
 ├── src/                           # Frontend Web Console & Client Inspection
-│   ├── App.tsx                    # Interactive dashboard & research defense console
+│   ├── App.tsx                    # Transparent prototype console with API-key input
 │   ├── index.css                  # Tailwind styles
 │   ├── main.tsx                   # React client bootstrap
 │   └── waf/                       # TypeScript WAF engine implementation
 │       ├── types.ts               # Core telemetry & decision data types
 │       ├── canonicalizer.ts       # Defensive request normalizer
-│       ├── rules.ts               # OWASP CRS regex rules
+│       ├── rules.ts               # Handwritten CRS-inspired regex signatures
 │       ├── profile.ts             # Application behavior profile engine
 │       ├── policy.ts              # Risk fusion & decision engine
 │       └── pipeline.ts            # Complete end-to-end WAF pipeline
 │
-├── waf/                           # Production Python Core WAF Package
+├── waf/                           # Python inspection pipeline
 │   ├── __init__.py                # Package initialization
-│   ├── pipeline.py                # 5-stage WAF inspection pipeline
+│   ├── pipeline.py                # Canonicalization, rules, heuristic, policy pipeline
 │   ├── normalization/             # Stage 1: Request Canonicalization
 │   │   ├── __init__.py
 │   │   └── canonicalizer.py
@@ -172,7 +177,9 @@ MAJOR WAF 7/
 │       ├── __init__.py
 │       └── policy_engine.py
 │
-├── scripts/                       # Core Production Scripts
+├── scripts/                       # Demo, split, training, and evaluation scripts
+│   ├── create_group_splits.py      # Deduplicate and create group-held-out train/val/test splits
+│   ├── evaluate_dataset.py         # Baseline comparison and cluster-bootstrap CIs
 │   ├── interactive_cli.py         # Live interactive attack testing CLI
 │   ├── live_attack_tester.py      # 20-vector test matrix (GET/POST/PUT/DELETE)
 │   ├── train_transformer.py       # Sequence-classification Transformer training script
@@ -191,6 +198,6 @@ MAJOR WAF 7/
     │       ├── run_robustness.py
     │       └── robustness_results.json
     ├── scripts/                   # Dataset Audit Tools
-    │   └── inspect_dataset.py     # Leak audit across 183,045 records
+    │   └── inspect_dataset.py     # Audit tool for user-supplied data
     └── diagnostics/               # Offline Diagnostic & Diagnostic Artifacts
 ```

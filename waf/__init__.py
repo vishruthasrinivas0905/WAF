@@ -1,5 +1,5 @@
 """
-AppAware-WAF: Production-Oriented, Application-Aware Transformer Web Application Firewall.
+AppAware-WAF: Application-aware web application firewall prototype.
 """
 
 from .pipeline import WafPipeline

@@ -1,0 +1,52 @@
+{
+  "study_title": "AppAware-WAF grouped evaluation",
+  "status": "template; replace every null/placeholder before reporting results",
+  "created_utc": null,
+  "dataset": {
+    "name": null,
+    "version": null,
+    "source_urls": [],
+    "retrieved_utc": null,
+    "license_spdx": null,
+    "license_notes": null,
+    "original_sha256": null,
+    "redistribution_allowed": false,
+    "fields": {
+      "request_column": "request",
+      "label_column": "is_attack",
+      "group_column": "application",
+      "category_column": "category"
+    },
+    "label_definition": {
+      "0": "benign",
+      "1": "malicious",
+      "labeling_procedure": null
+    }
+  },
+  "preprocessing": {
+    "canonicalizer": "waf/normalization/canonicalizer.py",
+    "deduplication": "SHA-256 of canonical request text before splitting",
+    "conflicting_duplicate_policy": "fail evaluation",
+    "split": "group-held-out; no group crosses train/test",
+    "test_size": 0.2,
+    "seed": 42
+  },
+  "model": {
+    "status": "no trained Transformer is included in this repository",
+    "architecture": null,
+    "training_code": null,
+    "checkpoint_sha256": null,
+    "tokenizer_sha256": null,
+    "training_seed": null,
+    "hyperparameters": null
+  },
+  "evaluation": {
+    "command": "python scripts/evaluate_dataset.py DATA.csv --group-column application",
+    "score_thresholds_selected_on": "validation split only",
+    "confidence_interval_method": "cluster bootstrap over held-out groups",
+    "hardware": null,
+    "operating_system": null,
+    "python_version": null,
+    "dependency_lock_hash": null
+  }
+}

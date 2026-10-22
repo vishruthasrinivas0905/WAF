@@ -1,7 +1,9 @@
+import "dotenv/config";
 import express, { Request, Response, NextFunction } from "express";
 import path from "path";
 import fs from "fs";
-import { exec } from "child_process";
+import { execFile } from "child_process";
+import { timingSafeEqual } from "crypto";
 import { fileURLToPath } from "url";
 import { WafPipelineTS } from "./src/waf/pipeline.ts";
 import { SecurityEvent, WafMetrics } from "./src/waf/types.ts";
@@ -10,15 +12,60 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = 3000;
+const port = Number(process.env.PORT || 3000);
+const adminToken = process.env.WAF_ADMIN_TOKEN?.trim() || "";
+const configuredMode = (process.env.WAF_MODE || "ENFORCING").toUpperCase();
+if (!["ENFORCING", "MONITORING", "SIMULATION"].includes(configuredMode)) {
+  throw new Error("WAF_MODE must be ENFORCING, MONITORING, or SIMULATION.");
+}
+const trustedProxyRanges = (process.env.WAF_TRUST_PROXY || "")
+  .split(",")
+  .map((range) => range.trim())
+  .filter(Boolean);
+
+if (trustedProxyRanges.some((range) => range.toLowerCase() === "true")) {
+  throw new Error("WAF_TRUST_PROXY must contain explicit trusted proxy IPs/CIDRs, never 'true'.");
+}
+if (trustedProxyRanges.length) app.set("trust proxy", trustedProxyRanges);
+else app.set("trust proxy", false);
+
+if (process.env.NODE_ENV === "production" && adminToken.length < 32) {
+  throw new Error("Set WAF_ADMIN_TOKEN to a random value of at least 32 characters in production.");
+}
+
+const upstreamUrl = process.env.UPSTREAM_URL ? new URL(process.env.UPSTREAM_URL) : null;
+if (upstreamUrl && (!['http:', 'https:'].includes(upstreamUrl.protocol) || upstreamUrl.username || upstreamUrl.password || upstreamUrl.pathname !== "/" || upstreamUrl.search || upstreamUrl.hash)) {
+  throw new Error("UPSTREAM_URL must be an http(s) origin without credentials, path, query, or fragment.");
+}
+
+function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!adminToken) {
+    if (process.env.NODE_ENV === "production") {
+      res.status(503).json({ error: "Management API is disabled until WAF_ADMIN_TOKEN is configured." });
+      return;
+    }
+    next();
+    return;
+  }
+
+  const supplied = req.header("authorization")?.replace(/^Bearer\s+/i, "") || "";
+  const expectedBytes = Buffer.from(adminToken);
+  const suppliedBytes = Buffer.from(supplied);
+  if (expectedBytes.length !== suppliedBytes.length || !timingSafeEqual(expectedBytes, suppliedBytes)) {
+    res.status(401).json({ error: "Valid admin bearer token required." });
+    return;
+  }
+  next();
+}
 
 // Body parser
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true, limit: "5mb" }));
 app.use(express.text({ type: ["text/*", "application/xml", "application/octet-stream"], limit: "5mb" }));
+app.use("/api/waf", requireAdmin);
 
 // Initialize WAF Pipeline
-const waf = new WafPipelineTS("ENFORCING");
+const waf = new WafPipelineTS(configuredMode as "ENFORCING" | "MONITORING" | "SIMULATION");
 
 // In-memory observability state
 const securityLogs: SecurityEvent[] = [];
@@ -28,9 +75,9 @@ const metrics: WafMetrics = {
   monitored: 0,
   blocked: 0,
   totalRuleMatches: 0,
-  p50LatencyMs: 0.85,
-  p95LatencyMs: 2.15,
-  p99LatencyMs: 4.80,
+  p50LatencyMs: 0,
+  p95LatencyMs: 0,
+  p99LatencyMs: 0,
   categoryCounts: {
     SQLI: 0,
     XSS: 0,
@@ -60,10 +107,14 @@ function recordEvent(event: SecurityEvent) {
   latencies.push(event.latencies.totalMs);
   if (latencies.length > 500) latencies.shift();
   const sorted = [...latencies].sort((a, b) => a - b);
-  metrics.p50LatencyMs = sorted[Math.floor(sorted.length * 0.5)] || 0.85;
-  metrics.p95LatencyMs = sorted[Math.floor(sorted.length * 0.95)] || 2.15;
-  metrics.p99LatencyMs = sorted[Math.floor(sorted.length * 0.99)] || 4.8;
+  metrics.p50LatencyMs = sorted[Math.floor(sorted.length * 0.5)] || 0;
+  metrics.p95LatencyMs = sorted[Math.floor(sorted.length * 0.95)] || 0;
+  metrics.p99LatencyMs = sorted[Math.floor(sorted.length * 0.99)] || 0;
 }
+
+app.get("/healthz", (_req: Request, res: Response) => {
+  res.json({ status: "ok", scoringEngine: "handcrafted-heuristic", upstreamConfigured: Boolean(upstreamUrl) });
+});
 
 // ============================================================================
 // 1. MOCK UPSTREAM WEB APPLICATION (/upstream/*)
@@ -110,9 +161,13 @@ app.all("/upstream/*", (req: Request, res: Response) => {
 // ============================================================================
 // 2. REVERSE PROXY GATEWAY WITH LIVE WAF INTERCEPTION (/proxy/*)
 // ============================================================================
-app.all("/proxy/*", (req: Request, res: Response) => {
+app.all("/proxy/*", async (req: Request, res: Response) => {
   // Reconstruct HTTP request stream for WAF inspection
-  const targetPath = req.url.replace(/^\/proxy/, "") || "/";
+  const targetPath = req.originalUrl.replace(/^\/proxy/, "") || "/";
+  if (!targetPath.startsWith("/") || targetPath.startsWith("//") || targetPath.includes("\\")) {
+    res.status(400).json({ error: "Invalid proxy request target." });
+    return;
+  }
   let bodyStr = "";
   if (typeof req.body === "object") {
     bodyStr = JSON.stringify(req.body);
@@ -130,7 +185,9 @@ app.all("/proxy/*", (req: Request, res: Response) => {
   rawRequest += `\r\n${bodyStr}`;
 
   // Execute full inspection chain through WAF
-  const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
+  // Express resolves req.ip through only the explicitly trusted proxy ranges above.
+  // With no WAF_TRUST_PROXY configured, the socket peer is used and X-Forwarded-For is ignored.
+  const clientIp = req.ip || req.socket.remoteAddress || "unknown";
   const event = waf.inspect(rawRequest, clientIp);
   recordEvent(event);
 
@@ -157,33 +214,101 @@ app.all("/proxy/*", (req: Request, res: Response) => {
     return;
   }
 
-  // ALLOW or MONITOR: Forward safely to Upstream Application
-  res.json({
-    gatewayStatus: "FORWARDED_TO_UPSTREAM",
-    wafDecision: event.decision,
-    wafRiskScore: event.riskScore,
-    upstreamUrl: `/upstream${targetPath}`,
-    upstreamMockResponse: {
-      message: "Upstream application processed the request successfully.",
+  if (!upstreamUrl) {
+    // Explicit local demo fallback. Configure UPSTREAM_URL to enable real proxying.
+    res.setHeader("X-WAF-Upstream-Mode", "mock-demo");
+    res.json({
+      gatewayStatus: "MOCK_UPSTREAM_RESPONSE",
+      wafDecision: event.decision,
+      wafRiskScore: event.riskScore,
+      message: "No UPSTREAM_URL is configured; this request was not forwarded to another application.",
       targetPath,
       method: req.method,
       query: req.query,
       body: req.body,
-    },
-  });
+    });
+    return;
+  }
+
+  try {
+    const targetUrl = new URL(targetPath, `${upstreamUrl.origin}/`);
+    if (targetUrl.origin !== upstreamUrl.origin) {
+      res.status(400).json({ error: "Proxy target must remain on the configured upstream origin." });
+      return;
+    }
+
+    const headers = new Headers();
+    const hopByHop = new Set(["connection", "content-encoding", "content-length", "host", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "forwarded"]);
+    for (const [name, value] of Object.entries(req.headers)) {
+      const lowerName = name.toLowerCase();
+      if (!hopByHop.has(lowerName) && !lowerName.startsWith("x-forwarded-") && typeof value === "string") headers.set(name, value);
+    }
+    headers.set("x-forwarded-for", clientIp);
+
+    const hasBody = !["GET", "HEAD"].includes(req.method.toUpperCase()) && req.body !== undefined;
+    const body = !hasBody ? undefined : typeof req.body === "string" ? req.body : Buffer.from(JSON.stringify(req.body));
+    const upstreamResponse = await fetch(targetUrl, {
+      method: req.method,
+      headers,
+      body,
+      redirect: "manual",
+      signal: AbortSignal.timeout(10000),
+    });
+
+    const responseHopByHop = new Set(["connection", "content-encoding", "content-length", "keep-alive", "transfer-encoding", "upgrade"]);
+    upstreamResponse.headers.forEach((value, name) => {
+      if (!responseHopByHop.has(name.toLowerCase())) res.setHeader(name, value);
+    });
+    res.setHeader("X-WAF-Decision", event.decision);
+    res.setHeader("X-WAF-Risk-Score", event.riskScore.toString());
+    res.setHeader("X-WAF-Event-ID", event.eventId);
+    res.setHeader("X-WAF-Latency-MS", event.latencies.totalMs.toString());
+    res.setHeader("X-WAF-Upstream-Mode", "configured-upstream");
+    res.status(upstreamResponse.status);
+
+    if (!upstreamResponse.body || req.method.toUpperCase() === "HEAD") {
+      res.end();
+      return;
+    }
+
+    const maxResponseBytes = 10 * 1024 * 1024;
+    const declaredLength = Number(upstreamResponse.headers.get("content-length") || 0);
+    if (declaredLength > maxResponseBytes) {
+      res.status(502).json({ error: "Upstream response exceeded the 10 MiB gateway limit." });
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let responseBytes = 0;
+    for await (const chunk of upstreamResponse.body) {
+      responseBytes += chunk.byteLength;
+      if (responseBytes > maxResponseBytes) {
+        res.status(502).json({ error: "Upstream response exceeded the 10 MiB gateway limit." });
+        return;
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+    res.end(Buffer.concat(chunks));
+  } catch (error) {
+    console.error("[Upstream Proxy Error]", error);
+    if (!res.headersSent) res.status(502).json({ error: "Configured upstream request failed or timed out." });
+    else res.destroy(error as Error);
+  }
 });
 
 // ============================================================================
 // 3. WAF MANAGEMENT & TELEMETRY REST APIs
 // ============================================================================
 app.post("/api/waf/inspect", (req: Request, res: Response) => {
-  const { request, clientIp, customMlScore } = req.body;
-  if (!request) {
-    res.status(400).json({ error: "Missing 'request' in body" });
+  const { request, customHeuristicScore } = req.body;
+  if (typeof request !== "string" || request.length === 0 || request.length > 1024 * 1024) {
+    res.status(400).json({ error: "'request' must be a non-empty string no larger than 1 MiB." });
     return;
   }
-
-  const event = waf.inspect(request, clientIp || "127.0.0.1", customMlScore);
+  if (customHeuristicScore !== undefined && (typeof customHeuristicScore !== "number" || customHeuristicScore < 0 || customHeuristicScore > 1)) {
+    res.status(400).json({ error: "customHeuristicScore must be a number between 0 and 1." });
+    return;
+  }
+  const event = waf.inspect(request, req.ip || req.socket.remoteAddress || "unknown", customHeuristicScore);
   recordEvent(event);
   res.json(event);
 });
@@ -194,6 +319,10 @@ app.get("/api/waf/metrics", (_req: Request, res: Response) => {
 
 app.get("/api/waf/events", (_req: Request, res: Response) => {
   res.json(securityLogs);
+});
+
+app.get("/api/waf/policy/mode", (_req: Request, res: Response) => {
+  res.json({ mode: waf.policy.mode });
 });
 
 app.post("/api/waf/policy/mode", (req: Request, res: Response) => {
@@ -208,7 +337,11 @@ app.post("/api/waf/policy/mode", (req: Request, res: Response) => {
 
 app.post("/api/waf/adapt", (req: Request, res: Response) => {
   const { budget } = req.body;
-  const sampleBudget = Number(budget) || 0;
+  const sampleBudget = Number(budget);
+  if (!Number.isInteger(sampleBudget) || ![0, 100, 500, 1000].includes(sampleBudget)) {
+    res.status(400).json({ error: "budget must be one of the demo values: 0, 100, 500, or 1000." });
+    return;
+  }
   
   // Seed sample benign profiles based on requested adaptation budget (0, 100, 500, 1000)
   const syntheticSamples: any[] = [];
@@ -225,62 +358,11 @@ app.post("/api/waf/adapt", (req: Request, res: Response) => {
   waf.profile.adaptFromBenignSamples(syntheticSamples);
   res.json({
     status: "adapted",
+    evidenceType: "synthetic_demo_samples",
+    researchEvidence: false,
     adaptationBudget: sampleBudget,
     knownEndpointsCount: waf.profile.endpoints.size,
     endpoints: Array.from(waf.profile.endpoints.keys()),
-  });
-});
-
-app.get("/api/waf/benchmarks", (_req: Request, res: Response) => {
-  // Returns genuine verified experimental data from the 183k dataset & trained DistilBERT checkpoint
-  res.json({
-    datasetMetrics: {
-      totalRecords: 183045,
-      trainRecords: 128131,
-      valRecords: 27457,
-      testRecords: 27457,
-      benignRecords: 72000,
-      maliciousRecords: 111045,
-      trainTestStringOverlap: "0.00% (0 / 27,457)",
-      sources: ["CSIC 2010", "ECML/PKDD", "HttpParamsDataset", "PayloadsAllTheThings", "Web-Application-Attack-Datasets"],
-    },
-    experimentA_baseline: {
-      totalTestSamples: 27457,
-      accuracy: 0.9457,
-      f1Score: 0.9532,
-      precision: 0.9995,
-      recall: 0.9109,
-      rocAuc: 0.9904,
-      fpr: 0.0006,
-      fnr: 0.0891,
-      confusionMatrix: {
-        TN: 10793,
-        FP: 7,
-        FN: 1484,
-        TP: 15173,
-      },
-      avgCpuLatencyMs: 144.71,
-      modelArch: "DistilBERT for Sequence Classification (66M params)",
-      modelWeightsFile: "models/transformer_waf/model.safetensors (267.8 MB)",
-    },
-    robustnessBenchmark: {
-      totalVariations: 19,
-      rawDetectionRate: 63.16,
-      canonicalizedDetectionRate: 100.0,
-      improvementPct: 36.84,
-      categories: ["SQLI", "XSS", "TRAVERSAL", "RCE"],
-    },
-    fewShotAdaptation: [
-      { budget: 0, fpr: 0.142, recall: 0.985, f1: 0.924, p50LatencyMs: 0.91 },
-      { budget: 100, fpr: 0.081, recall: 0.982, f1: 0.951, p50LatencyMs: 0.94 },
-      { budget: 500, fpr: 0.043, recall: 0.979, f1: 0.968, p50LatencyMs: 0.97 },
-      { budget: 1000, fpr: 0.021, recall: 0.976, f1: 0.978, p50LatencyMs: 1.02 },
-    ],
-    productionLatencies: {
-      rulesOnly: { p50: 0.18, p95: 0.42, p99: 0.89 },
-      transformerOnly: { p50: 144.71, p95: 185.2, p99: 220.0 },
-      hybridWaf: { p50: 0.95, p95: 2.30, p99: 4.80 },
-    },
   });
 });
 
@@ -294,26 +376,16 @@ app.get("/api/waf/benchmark/results", (_req: Request, res: Response) => {
       // Fallback
     }
   }
-  res.json({
-    timestamp: Date.now() / 1000,
-    total_samples: 1450,
-    throughput_rps: 4396.9,
-    metrics: { accuracy: 1.0, precision: 1.0, recall: 1.0, f1_score: 1.0, fpr: 0.0, fnr: 0.0 },
-    latency_ms: { mean: 0.226, p50: 0.214, p95: 0.322, p99: 0.476 },
-    breakdown: {
-      SQLI: { total: 250, blocked: 250, allowed: 0 },
-      XSS: { total: 250, blocked: 250, allowed: 0 },
-      RCE: { total: 250, blocked: 250, allowed: 0 },
-      TRAVERSAL: { total: 200, blocked: 200, allowed: 0 },
-      BENIGN: { total: 500, blocked: 0, allowed: 500 }
-    }
-  });
+  res.json({ available: false, message: "No benchmark report exists yet. Run the smoke benchmark or the group-held-out dataset evaluation." });
 });
 
 app.post("/api/waf/benchmark/run", (_req: Request, res: Response) => {
-  exec("python3 scripts/benchmark_waf.py", { cwd: __dirname }, (error, stdout) => {
+  const pythonCommand = process.platform === "win32" ? "python" : "python3";
+  execFile(pythonCommand, ["scripts/benchmark_waf.py"], { cwd: __dirname, timeout: 120000 }, (error, stdout, stderr) => {
     if (error) {
       console.error("[Benchmark Error]", error);
+      res.status(500).json({ error: stderr || error.message, output: stdout });
+      return;
     }
     const benchmarkFile = path.join(__dirname, "benchmark_results.json");
     if (fs.existsSync(benchmarkFile)) {
@@ -324,7 +396,7 @@ app.post("/api/waf/benchmark/run", (_req: Request, res: Response) => {
         return res.status(500).json({ error: err.message });
       }
     }
-    res.json({ status: "completed", output: stdout });
+    res.status(500).json({ error: "Benchmark completed without producing a readable report.", output: stdout });
   });
 });
 

@@ -114,8 +114,8 @@ class TestWafPipeline(unittest.TestCase):
         self.assertEqual(event["decision"], "BLOCK")
         self.assertIn("signals", event)
         self.assertIn("deterministic_score", event["signals"])
-        self.assertIn("transformer_score", event["signals"])
-        self.assertGreaterEqual(event["signals"]["transformer_score"], 0.70)
+        self.assertIn("heuristic_score", event["signals"])
+        self.assertGreaterEqual(event["signals"]["heuristic_score"], 0.70)
 
 
 if __name__ == "__main__":

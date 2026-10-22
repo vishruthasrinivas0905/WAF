@@ -1,0 +1,96 @@
+{
+  "report_type": "local_smoke_benchmark",
+  "created_at_utc": "2026-10-22T10:12:57.738736+00:00",
+  "evidence_scope": "Regression check on handcrafted examples only; not a publication or production performance claim.",
+  "unique_samples": 29,
+  "timing_iterations_per_sample": 50,
+  "timed_inspections": 1450,
+  "throughput_rps": 2486.36,
+  "dataset_sha256": "20d36f9b0b087bcbd040ef19fcaa02489748a5a008d2db615fa0e75744273647",
+  "metrics_by_lane": {
+    "rules_only": {
+      "n": 29,
+      "tp": 19,
+      "tn": 10,
+      "fp": 0,
+      "fn": 0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0,
+      "fpr": 0.0,
+      "fnr": 0.0
+    },
+    "heuristic_only": {
+      "n": 29,
+      "tp": 15,
+      "tn": 7,
+      "fp": 3,
+      "fn": 4,
+      "accuracy": 0.758621,
+      "precision": 0.833333,
+      "recall": 0.789474,
+      "f1_score": 0.810811,
+      "fpr": 0.3,
+      "fnr": 0.210526
+    },
+    "hybrid_rules_heuristic": {
+      "n": 29,
+      "tp": 19,
+      "tn": 10,
+      "fp": 0,
+      "fn": 0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0,
+      "fpr": 0.0,
+      "fnr": 0.0
+    }
+  },
+  "breakdown": {
+    "SQLI": {
+      "total": 5,
+      "blocked": 5,
+      "allowed": 0
+    },
+    "XSS": {
+      "total": 5,
+      "blocked": 5,
+      "allowed": 0
+    },
+    "RCE": {
+      "total": 5,
+      "blocked": 5,
+      "allowed": 0
+    },
+    "TRAVERSAL": {
+      "total": 4,
+      "blocked": 4,
+      "allowed": 0
+    },
+    "BENIGN": {
+      "total": 10,
+      "blocked": 0,
+      "allowed": 10
+    }
+  },
+  "latency_ms": {
+    "mean": 0.4013,
+    "p50": 0.3729,
+    "p95": 0.6365,
+    "p99": 1.0729
+  },
+  "environment": {
+    "python": "3.13.3",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "processor": "Intel64 Family 6 Model 154 Stepping 3, GenuineIntel",
+    "cpu_count": 16
+  },
+  "limitations": [
+    "Only 29 handcrafted requests are present in this corpus.",
+    "Accuracy metrics count each unique canonical request once; timing repetitions are not counted as new samples.",
+    "The heuristic is not a trained Transformer and latency excludes HTTP/network/upstream time.",
+    "No confidence intervals are reported for this small demo corpus; use evaluate_dataset.py for grouped evaluation."
+  ]
+}

@@ -12,7 +12,7 @@ export class PolicyEngine {
   public blockThreshold: number;
   public monitorThreshold: number;
   public wDet: number;
-  public wMl: number;
+  public wHeuristic: number;
   public wApp: number;
 
   constructor(options?: {
@@ -20,20 +20,20 @@ export class PolicyEngine {
     blockThreshold?: number;
     monitorThreshold?: number;
     wDet?: number;
-    wMl?: number;
+    wHeuristic?: number;
     wApp?: number;
   }) {
     this.mode = options?.mode || "ENFORCING";
     this.blockThreshold = options?.blockThreshold ?? 0.7;
     this.monitorThreshold = options?.monitorThreshold ?? 0.4;
     this.wDet = options?.wDet ?? 0.45;
-    this.wMl = options?.wMl ?? 0.4;
+    this.wHeuristic = options?.wHeuristic ?? 0.4;
     this.wApp = options?.wApp ?? 0.15;
   }
 
   public evaluate(
     detScore: number,
-    mlScore: number,
+    heuristicScore: number,
     appScore: number,
     ruleMatches: RuleMatch[],
     anomalyFlags: string[]
@@ -54,10 +54,10 @@ export class PolicyEngine {
     }
 
     // 2. Multi-Signal Fusion
-    let risk = this.wDet * detScore + this.wMl * mlScore + this.wApp * appScore;
+    let risk = this.wDet * detScore + this.wHeuristic * heuristicScore + this.wApp * appScore;
 
     // 3. Application-Aware False Positive Suppression
-    if (detScore === 0 && appScore === 0 && mlScore >= 0.35 && mlScore <= 0.65) {
+    if (detScore === 0 && appScore === 0 && heuristicScore >= 0.35 && heuristicScore <= 0.65) {
       risk *= 0.65; // Contextual attenuation
     }
 

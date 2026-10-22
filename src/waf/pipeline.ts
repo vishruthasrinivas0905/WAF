@@ -13,8 +13,8 @@ export class WafPipelineTS {
     this.policy = new PolicyEngine({ mode });
   }
 
-  // Fast Transformer-style subword / n-gram attention heuristic for immediate client-side or gateway fallback
-  public computeTransformerHeuristic(text: string): number {
+  // Handcrafted lexical and punctuation heuristic. This is not a trained Transformer model.
+  public computeHeuristicScore(text: string): number {
     if (!text) return 0.0;
     const lower = text.toLowerCase();
     const suspiciousSubwords = [
@@ -43,7 +43,7 @@ export class WafPipelineTS {
     return Math.min(0.99, weight);
   }
 
-  public inspect(rawRequest: string, clientIp = "127.0.0.1", customMlScore?: number): SecurityEvent {
+  public inspect(rawRequest: string, clientIp = "127.0.0.1", customHeuristicScore?: number): SecurityEvent {
     const t0 = performance.now();
 
     // 1. Canonicalization
@@ -60,14 +60,14 @@ export class WafPipelineTS {
     const profileEval = this.profile.evaluate(parsed);
     const profileScore = profileEval.score;
 
-    // 4. Transformer Model Inference
-    const tMl0 = performance.now();
-    const mlScore = customMlScore !== undefined ? customMlScore : this.computeTransformerHeuristic(parsed.canonicalText);
-    const tMl = performance.now() - tMl0;
+    // 4. Handcrafted heuristic scoring (not a trained model)
+    const tHeuristic0 = performance.now();
+    const heuristicScore = customHeuristicScore !== undefined ? customHeuristicScore : this.computeHeuristicScore(parsed.canonicalText);
+    const tHeuristic = performance.now() - tHeuristic0;
 
     // 5. Policy Decision
     const tPol0 = performance.now();
-    const decision = this.policy.evaluate(detScore, mlScore, profileScore, matches, parsed.anomalyFlags);
+    const decision = this.policy.evaluate(detScore, heuristicScore, profileScore, matches, parsed.anomalyFlags);
     const tPol = performance.now() - tPol0;
 
     const totalMs = performance.now() - t0;
@@ -84,7 +84,7 @@ export class WafPipelineTS {
       confidence: decision.confidence,
       signals: {
         deterministicScore: Math.round(detScore * 1000) / 1000,
-        transformerScore: Math.round(mlScore * 1000) / 1000,
+        heuristicScore: Math.round(heuristicScore * 1000) / 1000,
         profileScore: Math.round(profileScore * 1000) / 1000,
       },
       matchedRules: matches,
@@ -99,7 +99,7 @@ export class WafPipelineTS {
         totalMs: Math.round(totalMs * 100) / 100,
         canonicalizationMs: Math.round(tCanon * 100) / 100,
         rulesMs: Math.round(tRules * 100) / 100,
-        transformerMs: Math.round(tMl * 100) / 100,
+        heuristicMs: Math.round(tHeuristic * 100) / 100,
         policyMs: Math.round(tPol * 100) / 100,
       },
     };

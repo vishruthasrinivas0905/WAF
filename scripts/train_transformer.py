@@ -3,15 +3,16 @@
 TRANSFORMER WAF MODEL TRAINING PIPELINE
 Script: scripts/train_transformer.py
 
-Trains a sequence classification Transformer (DistilBERT or TinyBERT)
-on the standardized 183,045 HTTP request dataset.
+Optional training utility for externally supplied train/validation/test CSV splits.
+No dataset or trained checkpoint is bundled in this repository.
 
 Features:
 1. Strips dataset parser artifacts ('End - Id:', 'class: Valid') prior to tokenization.
 2. Uses target 'is_attack' (0=Benign, 1=Malicious).
 3. Evaluates ROC-AUC, PR-AUC, F1, FPR, FNR on validation set.
 4. Tunes classification threshold on validation set (NOT test set).
-5. Exports PyTorch weights, Hugging Face config, and ONNX model for high-speed inference.
+5. Saves the best Hugging Face checkpoint, test-only hash-keyed scores, and a
+   training/provenance manifest. ONNX export is not implemented here.
 """
 
 import os
@@ -21,6 +22,10 @@ import time
 import math
 import csv
 import json
+import hashlib
+import platform
+import random
+from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Transformer WAF Model")
@@ -31,8 +36,8 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for training reproducibility")
     parser.add_argument("--subsample", type=int, default=None, help="Optional subsample limit for quick dry run")
-    parser.add_argument("--export_onnx", action="store_true", help="Export to ONNX format after training")
     return parser.parse_args()
 
 def clean_request(text: str) -> str:
@@ -84,8 +89,13 @@ def main():
     except ImportError as e:
         print(f"\n[ERROR] Missing required library: {e}")
         print("Install dependencies with:")
-        print("  pip install torch transformers scikit-learn onnx onnxruntime accelerate")
+        print("  pip install torch transformers scikit-learn accelerate")
         sys.exit(1)
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using compute device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'})")
@@ -107,6 +117,10 @@ def main():
     print(f"Train records: {len(train_texts):,} (Malicious: {sum(train_labels):,}, Benign: {len(train_labels)-sum(train_labels):,})")
     print(f"Val records:   {len(val_texts):,} (Malicious: {sum(val_labels):,}, Benign: {len(val_labels)-sum(val_labels):,})")
     print(f"Test records:  {len(test_texts):,} (Malicious: {sum(test_labels):,}, Benign: {len(test_labels)-sum(test_labels):,})")
+    if set(train_labels) != {0, 1} or set(val_labels) != {0, 1}:
+        raise ValueError("Training and validation splits must each contain both labels.")
+    if not test_labels:
+        raise ValueError("Test split must contain at least one labeled request.")
 
     print(f"\nInitializing tokenizer: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -152,7 +166,8 @@ def main():
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(total_steps * 0.1), num_training_steps=total_steps)
 
     os.makedirs(args.output_dir, exist_ok=True)
-    best_val_f1 = 0.0
+    best_val_f1 = -1.0
+    best_epoch = 0
 
     print("\nStarting model training...")
     for epoch in range(1, args.epochs + 1):
@@ -202,6 +217,7 @@ def main():
 
         if f1 > best_val_f1:
             best_val_f1 = f1
+            best_epoch = epoch
             print(f"  [*] New best F1 score ({best_val_f1:.4f}). Saving model to {args.output_dir}...")
             model.save_pretrained(args.output_dir)
             tokenizer.save_pretrained(args.output_dir)
@@ -213,7 +229,7 @@ def main():
     best_model = AutoModelForSequenceClassification.from_pretrained(args.output_dir).to(device)
     best_model.eval()
 
-    test_preds, test_targets, test_probs = [], [], []
+    test_targets, test_probs = [], []
     with torch.no_grad():
         for batch in test_loader:
             input_ids = batch["input_ids"].to(device)
@@ -223,12 +239,24 @@ def main():
             test_probs.extend(probs)
             test_targets.extend(batch["labels"].numpy())
 
+    # Recompute validation scores from the selected best checkpoint; thresholds
+    # are selected on validation data, never on the held-out test labels.
+    val_targets = []
+    val_probs = []
+    with torch.no_grad():
+        for batch in val_loader:
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            outputs = best_model(input_ids=input_ids, attention_mask=attention_mask)
+            val_probs.extend(torch.softmax(outputs.logits, dim=-1)[:, 1].cpu().tolist())
+            val_targets.extend(batch["labels"].tolist())
+
     # Optimal threshold search on validation set
     thresholds = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
     best_thresh = 0.5
     best_val_thresh_f1 = 0.0
     for t in thresholds:
-        t_preds = (np.array(val_probs) >= t).astype(int) if 'np' in globals() else [(1 if p >= t else 0) for p in val_probs]
+        t_preds = [(1 if p >= t else 0) for p in val_probs]
         p_t, r_t, f_t, _ = precision_recall_fscore_support(val_targets, t_preds, average="binary")
         if f_t > best_val_thresh_f1:
             best_val_thresh_f1 = f_t
@@ -237,8 +265,8 @@ def main():
     print(f"Selected decision threshold from validation: {best_thresh} (Val F1: {best_val_thresh_f1:.4f})")
     final_test_preds = [(1 if p >= best_thresh else 0) for p in test_probs]
     t_prec, t_rec, t_f1, _ = precision_recall_fscore_support(test_targets, final_test_preds, average="binary")
-    t_auc = roc_auc_score(test_targets, test_probs)
-    tn, fp, fn, tp = confusion_matrix(test_targets, final_test_preds).ravel()
+    t_auc = roc_auc_score(test_targets, test_probs) if len(set(test_targets)) == 2 else None
+    tn, fp, fn, tp = confusion_matrix(test_targets, final_test_preds, labels=[0, 1]).ravel()
     t_fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
     t_fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
 
@@ -248,7 +276,7 @@ def main():
         "test_f1": round(t_f1, 4),
         "test_precision": round(t_prec, 4),
         "test_recall": round(t_rec, 4),
-        "test_roc_auc": round(t_auc, 4),
+        "test_roc_auc": round(t_auc, 4) if t_auc is not None else None,
         "test_fpr": round(t_fpr, 4),
         "test_fnr": round(t_fnr, 4),
         "confusion_matrix": {"TN": int(tn), "FP": int(fp), "FN": int(fn), "TP": int(tp)},
@@ -258,6 +286,49 @@ def main():
     report_path = os.path.join(args.output_dir, "test_metrics.json")
     with open(report_path, "w") as f:
         json.dump(metrics_report, f, indent=2)
+
+    # Emit test-only scores keyed by the same canonical-request hash used by
+    # evaluate_dataset.py so external scores can be joined without payload logs.
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    from waf.normalization.canonicalizer import Canonicalizer
+    canonicalizer = Canonicalizer()
+    score_path = Path(args.output_dir) / "test_model_scores.csv"
+    with score_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["request_sha256", "model_score"])
+        writer.writeheader()
+        for request_text, probability in zip(test_texts, test_probs):
+            canonical = canonicalizer.parse_raw_http_request(request_text)["canonical_text"]
+            request_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            writer.writerow({"request_sha256": request_hash, "model_score": probability})
+
+    source_hashes = {}
+    for split_name, split_path in (("train", train_path), ("validation", val_path), ("test", test_path)):
+        source_hashes[split_name] = hashlib.sha256(Path(split_path).read_bytes()).hexdigest()
+    artifact_hashes = {}
+    for artifact in sorted(Path(args.output_dir).rglob("*")):
+        if artifact.is_file() and artifact.name not in {"training_manifest.json"}:
+            artifact_hashes[str(artifact.relative_to(args.output_dir))] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    try:
+        import transformers
+        transformers_version = transformers.__version__
+    except Exception:
+        transformers_version = None
+    training_manifest = {
+        "seed": args.seed,
+        "model_name": args.model_name,
+        "max_length": args.max_length,
+        "batch_size": args.batch_size,
+        "epochs_requested": args.epochs,
+        "best_epoch_by_validation_f1": best_epoch,
+        "learning_rate": args.learning_rate,
+        "selected_threshold_from_validation": best_thresh,
+        "dataset_split_sha256": source_hashes,
+        "artifact_sha256": artifact_hashes,
+        "runtime": {"python": platform.python_version(), "torch": torch.__version__, "transformers": transformers_version, "platform": platform.platform(), "device": str(device)},
+        "note": "Generated from externally supplied train/validation/test files. Verify license and group-disjoint split provenance separately.",
+    }
+    (Path(args.output_dir) / "training_manifest.json").write_text(json.dumps(training_manifest, indent=2), encoding="utf-8")
 
     print("\n--- Final Test Metrics Report ---")
     print(json.dumps(metrics_report, indent=2))

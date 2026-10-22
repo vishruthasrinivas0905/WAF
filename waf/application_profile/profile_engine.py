@@ -2,9 +2,9 @@
 APPLICATION PROFILE & FEW-SHOT ADAPTATION ENGINE
 Module: waf/application_profile/profile_engine.py
 
-Represents legitimate application behavior to address the core research question:
-"Can application-aware adaptation of a Transformer-based WAF reduce false positives
-on previously unseen web applications using limited benign application-specific traffic?"
+Represents observed route behavior for a prototype application-profile demonstration.
+The current dashboard adaptation endpoint feeds synthetic samples and is not a
+validated experiment on previously unseen applications.
 
 Features:
 1. Static Application Specification (registered routes, allowed HTTP methods)

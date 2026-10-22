@@ -13,17 +13,18 @@ services:
     ports:
       - "8080:3000"
     environment:
-      - NODE_ENV=production
-      - PORT=3000
-      - WAF_MODE=ENFORCING
-      - UPSTREAM_URL=http://upstream-vulnerable-app:3000
-      - ADAPTATION_BUDGET=500
+      NODE_ENV: production
+      PORT: 3000
+      WAF_MODE: ENFORCING
+      UPSTREAM_URL: http://upstream-vulnerable-app:3000
+      WAF_ADMIN_TOKEN: ${WAF_ADMIN_TOKEN:?Set WAF_ADMIN_TOKEN to a random secret of at least 32 characters}
+      WAF_TRUST_PROXY: ${WAF_TRUST_PROXY:-}
     depends_on:
       - upstream-vulnerable-app
     networks:
       - waf_net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/api/waf/metrics"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 3

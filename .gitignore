@@ -19,3 +19,7 @@ __pycache__/
 .coverage
 htmlcov/
 bun.lock
+private-data/
+private-model/
+models/
+evaluation_results/

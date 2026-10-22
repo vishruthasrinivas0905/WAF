@@ -2,9 +2,9 @@
 RISK AND POLICY DECISION ENGINE
 Module: waf/risk/policy_engine.py
 
-Fuses three independent defensive signals:
+Fuses three prototype defensive signals:
 1. S_det: Deterministic Rule Severity (OWASP CRS matches)
-2. P_ml: Transformer Deep Learning Inference Probability
+2. S_heuristic: Handcrafted lexical/entropy heuristic score (not a trained model)
 3. S_app: Application Profile Anomaly / Context Score
 
 Decisions:
@@ -22,7 +22,7 @@ class PolicyDecision:
         risk_score: float,
         confidence: float,
         deterministic_score: float,
-        transformer_score: float,
+        heuristic_score: float,
         profile_score: float,
         matched_rules: List[str],
         anomaly_flags: List[str],
@@ -32,7 +32,7 @@ class PolicyDecision:
         self.risk_score = risk_score
         self.confidence = confidence
         self.deterministic_score = deterministic_score
-        self.transformer_score = transformer_score
+        self.heuristic_score = heuristic_score
         self.profile_score = profile_score
         self.matched_rules = matched_rules
         self.anomaly_flags = anomaly_flags
@@ -45,7 +45,7 @@ class PolicyDecision:
             "confidence": round(self.confidence, 4),
             "signals": {
                 "deterministic": round(self.deterministic_score, 4),
-                "transformer": round(self.transformer_score, 4),
+                "heuristic": round(self.heuristic_score, 4),
                 "profile": round(self.profile_score, 4)
             },
             "matched_rules": self.matched_rules,
@@ -61,7 +61,7 @@ class PolicyEngine:
         block_threshold: float = 0.70,
         monitor_threshold: float = 0.40,
         w_det: float = 0.45,
-        w_ml: float = 0.40,
+        w_heuristic: float = 0.40,
         w_app: float = 0.15
     ):
         self.mode = mode
@@ -69,13 +69,13 @@ class PolicyEngine:
         self.monitor_threshold = monitor_threshold
         # Signal weights (sum to 1.0)
         self.w_det = w_det
-        self.w_ml = w_ml
+        self.w_heuristic = w_heuristic
         self.w_app = w_app
 
     def evaluate(
         self,
         det_score: float,
-        ml_score: float,
+        heuristic_score: float,
         app_score: float,
         rule_matches: List[Any],
         canonical_anomalies: List[str]
@@ -100,7 +100,7 @@ class PolicyEngine:
                 risk_score=composite_risk,
                 confidence=0.98,
                 deterministic_score=det_score,
-                transformer_score=ml_score,
+                heuristic_score=heuristic_score,
                 profile_score=app_score,
                 matched_rules=rule_ids,
                 anomaly_flags=canonical_anomalies,
@@ -110,16 +110,16 @@ class PolicyEngine:
         # 2. Weighted Signal Fusion
         composite_risk = (
             (self.w_det * det_score) +
-            (self.w_ml * ml_score) +
+            (self.w_heuristic * heuristic_score) +
             (self.w_app * app_score)
         )
 
         # 3. Contextual Adjustment (Application-Aware False Positive Suppression)
-        # If Transformer is moderately uncertain (0.40 - 0.65) but:
+        # If the heuristic is moderately uncertain (0.40 - 0.65) but:
         # - Deterministic rules are 0
         # - Route and parameters perfectly match learned application profile (app_score == 0)
         # -> Suppress false positive by moderating risk
-        if det_score == 0.0 and app_score == 0.0 and (0.35 <= ml_score <= 0.65):
+        if det_score == 0.0 and app_score == 0.0 and (0.35 <= heuristic_score <= 0.65):
             composite_risk *= 0.65  # Contextual reduction
 
         # 4. Canonicalization Evasion Penalty
@@ -148,7 +148,7 @@ class PolicyEngine:
             risk_score=composite_risk,
             confidence=confidence,
             deterministic_score=det_score,
-            transformer_score=ml_score,
+            heuristic_score=heuristic_score,
             profile_score=app_score,
             matched_rules=rule_ids,
             anomaly_flags=canonical_anomalies,
