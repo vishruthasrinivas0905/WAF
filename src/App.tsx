@@ -1,32 +1,41 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Activity, AlertTriangle, LockKeyhole, Send, Shield } from "lucide-react";
+import { Activity, AlertTriangle, ArrowDown, ArrowRight, BarChart3, CheckCircle2, Code2, Cpu, Database, FileText, Layers, LockKeyhole, Play, RefreshCw, Shield, ShieldAlert, ShieldCheck, Terminal, X } from "lucide-react";
 import { SecurityEvent, WafMetrics } from "./waf/types.ts";
 
-const emptyMetrics: WafMetrics = {
-  totalRequests: 0,
-  allowed: 0,
-  monitored: 0,
-  blocked: 0,
-  totalRuleMatches: 0,
-  p50LatencyMs: 0,
-  p95LatencyMs: 0,
-  p99LatencyMs: 0,
-  categoryCounts: { SQLI: 0, XSS: 0, RCE: 0, TRAVERSAL: 0, SCANNER: 0 },
-};
+const emptyMetrics: WafMetrics = { totalRequests: 0, allowed: 0, monitored: 0, blocked: 0, totalRuleMatches: 0, p50LatencyMs: 0, p95LatencyMs: 0, p99LatencyMs: 0, categoryCounts: { SQLI: 0, XSS: 0, RCE: 0, TRAVERSAL: 0, SCANNER: 0 } };
+type Tab = "gateway" | "evaluation" | "adaptation" | "robustness" | "dataset" | "research";
+type DemoCase = { id: string; title: string; note: string; method: string; target: string; body: string; attack: boolean };
+const demoCases: DemoCase[] = [
+  { id: "safe", title: "Normal product search", note: "Ordinary query; expected to pass.", method: "GET", target: "/upstream/api/products?category=electronics&page=1", body: "", attack: false },
+  { id: "sqli", title: "SQL injection attempt", note: "SQL tautology signature example.", method: "GET", target: "/upstream/api/products?id=1%20OR%201=1", body: "", attack: true },
+  { id: "xss", title: "Script injection attempt", note: "HTML script signature example.", method: "POST", target: "/upstream/api/orders", body: JSON.stringify({ comment: "<script>alert(1)</script>" }, null, 2), attack: true },
+  { id: "traversal", title: "Path traversal attempt", note: "Traversal signature example.", method: "GET", target: "/upstream/api/products?file=..%2F..%2Fetc%2Fpasswd", body: "", attack: true },
+];
+type GatewayResult = { status: number; decision: string; risk: number | null; mode: string; eventId: string; body: unknown; target: string; method: string };
+type SmokeReport = { evidence_scope?: string; unique_samples?: number; timing_iterations_per_sample?: number; latency_ms?: { mean: number; p50: number; p95: number; p99: number }; metrics_by_lane?: Record<string, { accuracy: number; precision: number; recall: number; f1_score: number; fpr: number; fnr: number; n: number }>; error?: string; message?: string };
+
+const tabs: { id: Tab; label: string; icon: typeof Shield }[] = [
+  { id: "gateway", label: "Live Gateway", icon: Terminal }, { id: "evaluation", label: "Benchmark & Evaluation", icon: BarChart3 }, { id: "adaptation", label: "Few-Shot Adaptation", icon: Cpu }, { id: "robustness", label: "Robustness & Evasion", icon: Layers }, { id: "dataset", label: "Dataset & Provenance", icon: Database }, { id: "research", label: "Research Manuscript", icon: FileText },
+];
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("gateway");
   const [adminToken, setAdminToken] = useState("");
   const [adminError, setAdminError] = useState("");
   const [mode, setMode] = useState<"ENFORCING" | "MONITORING">("ENFORCING");
   const [method, setMethod] = useState("GET");
-  const [target, setTarget] = useState("/api/v1/products?category=electronics&page=1");
+  const [target, setTarget] = useState(demoCases[0].target);
   const [body, setBody] = useState("");
-  const [event, setEvent] = useState<SecurityEvent | null>(null);
-  const [gatewayResult, setGatewayResult] = useState<any>(null);
+  const [selectedDemo, setSelectedDemo] = useState("safe");
+  const [result, setResult] = useState<GatewayResult | null>(null);
   const [metrics, setMetrics] = useState<WafMetrics>(emptyMetrics);
-  const [recentEvents, setRecentEvents] = useState<SecurityEvent[]>([]);
+  const [events, setEvents] = useState<SecurityEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [budget, setBudget] = useState(0);
+  const [adaptResult, setAdaptResult] = useState<{ status?: string; evidenceType?: string; adaptationBudget?: number; knownEndpointsCount?: number; endpoints?: string[]; error?: string } | null>(null);
+  const [smokeReport, setSmokeReport] = useState<SmokeReport | null>(null);
+  const [smokeBusy, setSmokeBusy] = useState(false);
 
   const apiFetch = useCallback((url: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
@@ -34,209 +43,139 @@ export default function App() {
     return fetch(url, { ...init, headers });
   }, [adminToken]);
 
-  const refreshTelemetry = useCallback(async () => {
+  const refresh = useCallback(async () => {
     try {
-      const [metricsResponse, eventsResponse, modeResponse] = await Promise.all([
-        apiFetch("/api/waf/metrics"),
-        apiFetch("/api/waf/events"),
-        apiFetch("/api/waf/policy/mode"),
-      ]);
-      if (metricsResponse.status === 401 || eventsResponse.status === 401 || modeResponse.status === 401) {
-        setAdminError("Management API key required or invalid.");
-        return;
-      }
-      if (metricsResponse.ok) setMetrics(await metricsResponse.json());
-      if (eventsResponse.ok) setRecentEvents(await eventsResponse.json());
-      if (modeResponse.ok) setMode((await modeResponse.json()).mode);
-      setAdminError("");
-    } catch {
-      setError("Cannot reach the local WAF service yet.");
-    }
+      const [m, e, p] = await Promise.all([apiFetch("/api/waf/metrics"), apiFetch("/api/waf/events"), apiFetch("/api/waf/policy/mode")]);
+      if ([m, e, p].some((r) => r.status === 401)) { setAdminError("Enter the configured management API key to use telemetry and policy controls."); return; }
+      if (m.ok) setMetrics(await m.json()); if (e.ok) setEvents(await e.json());
+      if (p.ok) setMode((await p.json()).mode); setAdminError("");
+    } catch { setError("WAF service is not responding. Make sure the local server is running."); }
   }, [apiFetch]);
 
-  useEffect(() => {
-    refreshTelemetry();
-    const interval = setInterval(refreshTelemetry, 4000);
-    return () => clearInterval(interval);
-  }, [refreshTelemetry]);
+  const fetchSmokeReport = useCallback(async () => {
+    try { const response = await apiFetch("/api/waf/benchmark/results"); if (response.ok) setSmokeReport(await response.json()); }
+    catch { setSmokeReport({ message: "Smoke report is not available from the local service." }); }
+  }, [apiFetch]);
 
-  const changeMode = async (nextMode: "ENFORCING" | "MONITORING") => {
+  useEffect(() => { refresh(); const timer = setInterval(refresh, 5000); return () => clearInterval(timer); }, [refresh]);
+  useEffect(() => { fetchSmokeReport(); }, [fetchSmokeReport]);
+
+  const changeMode = async (next: "ENFORCING" | "MONITORING") => {
     try {
-      const response = await apiFetch("/api/waf/policy/mode", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: nextMode }),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Mode update failed.");
-      setMode(nextMode);
-      setAdminError("");
-    } catch (err) {
-      setAdminError(err instanceof Error ? err.message : "Mode update failed.");
-    }
+      const r = await apiFetch("/api/waf/policy/mode", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: next }) });
+      const data = await r.json(); if (!r.ok) throw new Error(data.error || "Policy update failed."); setMode(next); setAdminError("");
+    } catch (e) { setAdminError(e instanceof Error ? e.message : "Policy update failed."); }
   };
 
-  const inspectAndSend = async (submitEvent: React.FormEvent) => {
-    submitEvent.preventDefault();
-    setBusy(true);
-    setError("");
-    setGatewayResult(null);
-    setEvent(null);
-    try {
-      const rawRequest = `${method} ${target} HTTP/1.1\r\nHost: gateway.local\r\nUser-Agent: AppAware-WAF-Demo\r\n${body ? "Content-Type: application/json\r\n" : ""}\r\n${body}`;
-      const inspectResponse = await apiFetch("/api/waf/inspect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ request: rawRequest }),
-      });
-      const inspectData = await inspectResponse.json();
-      if (!inspectResponse.ok) {
-        if (inspectResponse.status === 401) setAdminError("Management API key required or invalid.");
-        throw new Error(inspectData.error || "Inspection failed.");
-      }
-      setEvent(inspectData);
+  const chooseDemo = (demo: DemoCase, openGateway = false) => { setSelectedDemo(demo.id); setMethod(demo.method); setTarget(demo.target); setBody(demo.body); setResult(null); setError(""); if (openGateway) setActiveTab("gateway"); };
 
-      const proxyTarget = target.startsWith("/") ? target : `/${target}`;
-      const proxyResponse = await fetch(`/proxy${proxyTarget}`, {
-        method,
-        headers: body ? { "Content-Type": "application/json" } : undefined,
-        body: body && !["GET", "HEAD"].includes(method) ? body : undefined,
-      });
-      const responseText = await proxyResponse.text();
-      let responseData: unknown = responseText;
-      try { responseData = JSON.parse(responseText); } catch { /* Plain text or HTML upstream response. */ }
-      setGatewayResult({
-        status: proxyResponse.status,
-        mode: proxyResponse.headers.get("X-WAF-Upstream-Mode") || "unknown",
-        decision: proxyResponse.headers.get("X-WAF-Decision"),
-        body: responseData,
-      });
-      await refreshTelemetry();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Request failed.");
-    } finally {
-      setBusy(false);
-    }
+  const sendRequest = async (event: React.FormEvent) => {
+    event.preventDefault(); setBusy(true); setError(""); setResult(null);
+    try {
+      const path = target.startsWith("/") ? target : `/${target}`;
+      const headers = new Headers(); if (body.trim()) headers.set("Content-Type", "application/json");
+      const response = await fetch(`/proxy${path}`, { method, headers, body: body.trim() && !["GET", "HEAD"].includes(method) ? body : undefined });
+      const raw = await response.text(); let responseBody: unknown = raw; try { responseBody = JSON.parse(raw); } catch { /* upstream response may be text */ }
+      const risk = response.headers.get("X-WAF-Risk-Score");
+      setResult({ status: response.status, decision: response.headers.get("X-WAF-Decision") || "UNKNOWN", risk: risk === null ? null : Number(risk), mode: response.headers.get("X-WAF-Upstream-Mode") || "blocked before upstream", eventId: response.headers.get("X-WAF-Event-ID") || "—", body: responseBody, target: path, method });
+      await refresh();
+    } catch (e) { setError(e instanceof Error ? e.message : "Request could not be sent."); }
+    finally { setBusy(false); }
   };
 
-  const decisionColor = (decision: string) => decision === "BLOCK" ? "text-rose-300" : decision === "MONITOR" ? "text-amber-300" : "text-emerald-300";
+  const adapt = async (nextBudget: number) => {
+    setBudget(nextBudget); setAdaptResult(null);
+    try {
+      const r = await apiFetch("/api/waf/adapt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ budget: nextBudget }) });
+      const data = await r.json(); if (!r.ok) throw new Error(data.error || "Profile update failed."); setAdaptResult(data);
+    } catch (e) { setAdaptResult({ error: e instanceof Error ? e.message : "Profile update failed." }); }
+  };
 
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <header className="border-b border-slate-800 bg-slate-900/80">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-indigo-600 p-2"><Shield className="w-5 h-5" /></div>
-            <div>
-              <h1 className="font-bold">AppAware-WAF</h1>
-              <p className="text-xs text-slate-400">Request inspection and configured-upstream demo</p>
-            </div>
-          </div>
-          <label className="flex items-center gap-2 text-xs text-slate-300">
-            <LockKeyhole className="w-4 h-4" />
-            <span>Management API key</span>
-            <input type="password" autoComplete="off" value={adminToken} onChange={(e) => setAdminToken(e.target.value)} placeholder="If configured" className="w-56 rounded border border-slate-700 bg-slate-950 px-2.5 py-2" />
-          </label>
-        </div>
-      </header>
+  const runSmoke = async () => {
+    setSmokeBusy(true); setSmokeReport(null);
+    try {
+      const r = await apiFetch("/api/waf/benchmark/run", { method: "POST" }); const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "Smoke benchmark could not run."); setSmokeReport(data.data); await fetchSmokeReport();
+    } catch (e) { setSmokeReport({ error: e instanceof Error ? e.message : "Smoke benchmark could not run." }); }
+    finally { setSmokeBusy(false); }
+  };
 
-      <main className="max-w-7xl mx-auto p-4 sm:p-6 space-y-5">
-        <section className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 flex gap-3 text-sm text-amber-100">
-          <AlertTriangle className="w-5 h-5 shrink-0 text-amber-300" />
-          <div><strong>Research prototype:</strong> The bundled score is a handcrafted heuristic, not a trained Transformer. No research dataset or model checkpoint is included. Previous dataset-scale figures were not reproducible from this checkout and are not shown as results.</div>
-        </section>
+  const blockDetails = result?.body && typeof result.body === "object" ? result.body as { reason?: string; matchedRules?: Array<{ id: string; category: string; description: string }> } : null;
 
-        {adminError && <p className="rounded-lg border border-amber-500/30 bg-slate-900 p-3 text-sm text-amber-200">{adminError}</p>}
-        {error && <p className="rounded-lg border border-rose-500/30 bg-slate-900 p-3 text-sm text-rose-200">{error}</p>}
+  return <div className="min-h-screen bg-slate-950 text-slate-100" style={{ backgroundColor: "#020617", color: "#f1f5f9" }}>
+    <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-900/95 backdrop-blur" style={{ backgroundColor: "#0f172a" }}>
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 py-3 sm:px-6">
+        <div className="flex items-center gap-3"><div className="rounded-lg bg-indigo-600 p-2 text-white"><Shield className="h-5 w-5" /></div><div><div className="flex flex-wrap items-center gap-2"><span className="text-base font-bold tracking-tight">AppAware-WAF</span><span className="rounded border border-indigo-400/20 bg-indigo-500/10 px-2 py-0.5 text-[10px] font-medium uppercase text-indigo-300">Research prototype</span></div><p className="hidden text-xs text-slate-400 sm:block">Application-aware request inspection · deterministic signatures · heuristic scoring</p></div></div>
+        <div className="flex flex-wrap items-center gap-3"><div className="hidden items-center gap-3 rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2 text-[11px] md:flex"><span className="text-slate-300"><Activity className="mr-1 inline h-3.5 w-3.5 text-cyan-300" />P50 <b className="font-mono text-cyan-200">{metrics.p50LatencyMs.toFixed(2)} ms</b></span><span className="text-emerald-300">Allowed {metrics.allowed}</span><span className="text-rose-300">Blocked {metrics.blocked}</span></div><div className="flex rounded-lg border border-slate-700 bg-slate-800 p-1">{(["ENFORCING", "MONITORING"] as const).map((item) => <button key={item} onClick={() => changeMode(item)} aria-pressed={mode === item} className={`rounded px-2.5 py-1.5 text-[10px] font-semibold ${mode === item ? item === "ENFORCING" ? "bg-rose-500/20 text-rose-200" : "bg-amber-500/20 text-amber-200" : "text-slate-400 hover:text-white"}`}>{item}</button>)}</div></div>
+      </div>
+      <nav className="mx-auto flex max-w-7xl flex-wrap gap-x-1 border-t border-slate-800 px-3 sm:px-6" aria-label="Project pages">{tabs.map((tab) => { const Icon = tab.icon; return <button key={tab.id} onClick={() => setActiveTab(tab.id)} aria-current={activeTab === tab.id ? "page" : undefined} className={`flex shrink-0 items-center gap-2 border-b-2 px-3 py-3 text-xs font-medium transition ${activeTab === tab.id ? "border-indigo-400 bg-indigo-500/[0.06] text-indigo-300" : "border-transparent text-slate-400 hover:border-slate-600 hover:text-white"}`}><Icon className="h-4 w-4" />{tab.label}</button>; })}</nav>
+    </header>
 
-        <div className="grid gap-5 lg:grid-cols-5">
-          <form onSubmit={inspectAndSend} className="lg:col-span-3 rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <h2 className="font-semibold">Inspect a request</h2>
-              <div className="flex gap-1 rounded-lg bg-slate-950 p-1">
-                {(["ENFORCING", "MONITORING"] as const).map((item) => (
-                  <button key={item} type="button" onClick={() => changeMode(item)} className={`rounded px-3 py-1.5 text-xs ${mode === item ? "bg-indigo-600 text-white" : "text-slate-400"}`}>{item}</button>
-                ))}
-              </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-[130px_1fr]">
-              <label className="text-xs text-slate-400">Method
-                <select value={method} onChange={(e) => setMethod(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100">
-                  {["GET", "POST", "PUT", "DELETE", "PATCH"].map((verb) => <option key={verb}>{verb}</option>)}
-                </select>
-              </label>
-              <label className="text-xs text-slate-400">Path and query
-                <input required value={target} onChange={(e) => setTarget(e.target.value)} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100" />
-              </label>
-            </div>
-            <label className="block text-xs text-slate-400">Optional request body
-              <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={5} placeholder='{"comment":"hello"}' className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100" />
-            </label>
-            <button disabled={busy} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium hover:bg-indigo-500 disabled:opacity-50">
-              <Send className="w-4 h-4" />{busy ? "Inspecting…" : "Inspect and send through gateway"}
-            </button>
-            <p className="text-xs text-slate-500">The dashboard sends one inspection request and then sends the request through `/proxy/*`; use a test target you control.</p>
+    <main className="mx-auto max-w-7xl space-y-6 p-4 sm:p-6 lg:p-8">
+      {adminError && <Notice tone="amber">{adminError}</Notice>}{error && <Notice tone="rose">{error}</Notice>}
+
+      {activeTab === "gateway" && <div className="space-y-5">
+        <PageHeading eyebrow="Live Gateway Interceptor" title="Inspect a request, then see the gateway decision" text="The request is sent once through the local WAF gateway. The result includes the decision, matched rule, and mock or configured upstream response." />
+        <div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
+          <form onSubmit={sendRequest} className="space-y-4 rounded-xl border border-slate-800 bg-slate-900/80 p-5" style={{ backgroundColor: "#0f172a" }}>
+            <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">Request builder</h2><span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] text-emerald-200">Local demo target</span></div>
+            <div className="grid gap-2 sm:grid-cols-2">{demoCases.slice(0, 3).map((demo) => <button type="button" key={demo.id} onClick={() => chooseDemo(demo)} className={`rounded-lg border p-3 text-left transition ${selectedDemo === demo.id ? demo.attack ? "border-rose-400/50 bg-rose-500/[0.08]" : "border-emerald-400/50 bg-emerald-500/[0.08]" : "border-slate-700 bg-slate-950/70 hover:border-indigo-400/60"}`}><span className={`text-[9px] font-bold uppercase ${demo.attack ? "text-rose-300" : "text-emerald-300"}`}>{demo.attack ? "Attack example" : "Benign example"}</span><span className="mt-1 block text-xs font-semibold text-white">{demo.title}</span><span className="mt-1 block text-[10px] text-slate-500">{demo.note}</span></button>)}</div>
+            <div className="grid gap-3 sm:grid-cols-[120px_1fr]"><label className="text-xs text-slate-400">Method<select value={method} onChange={(e) => { setMethod(e.target.value); setSelectedDemo(""); }} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-white">{["GET", "POST", "PUT", "DELETE", "PATCH"].map((m) => <option key={m}>{m}</option>)}</select></label><label className="text-xs text-slate-400">Path and query<input value={target} required onChange={(e) => { setTarget(e.target.value); setSelectedDemo(""); }} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2.5 font-mono text-xs text-white" /></label></div>
+            {method !== "GET" && <label className="block text-xs text-slate-400">Request body<textarea value={body} onChange={(e) => { setBody(e.target.value); setSelectedDemo(""); }} rows={4} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2.5 font-mono text-xs text-white" /></label>}
+            <button disabled={busy} className="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"><Play className="h-4 w-4" />{busy ? "Inspecting request…" : "Send through the WAF gateway"}<ArrowRight className="h-4 w-4" /></button>
+            <p className="text-[11px] text-slate-500">Without <code>UPSTREAM_URL</code>, allowed requests receive a labeled mock response and are not forwarded externally.</p>
           </form>
-
-          <section className="lg:col-span-2 rounded-xl border border-slate-800 bg-slate-900 p-5">
-            <h2 className="mb-4 flex items-center gap-2 font-semibold"><Activity className="w-4 h-4 text-cyan-300" />Runtime telemetry</h2>
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <Metric label="Requests" value={metrics.totalRequests} />
-              <Metric label="Blocked" value={metrics.blocked} />
-              <Metric label="Allowed" value={metrics.allowed} />
-              <Metric label="Monitored" value={metrics.monitored} />
-              <Metric label="P50 inspection" value={`${metrics.p50LatencyMs.toFixed(2)} ms`} />
-              <Metric label="P95 inspection" value={`${metrics.p95LatencyMs.toFixed(2)} ms`} />
-            </div>
-            <p className="mt-4 text-xs text-slate-500">In-memory counts for this process only; timings exclude client network and upstream latency.</p>
-          </section>
-        </div>
-
-        {(event || gatewayResult) && (
-          <div className="grid gap-5 lg:grid-cols-2">
-            {event && <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-3">
-              <h2 className={`font-semibold ${decisionColor(event.decision)}`}>{event.decision} · risk {event.riskScore.toFixed(3)}</h2>
-              <p className="text-sm text-slate-300">{event.decisionReason}</p>
-              <div className="grid grid-cols-3 gap-2 text-xs">
-                <Metric label="Rules" value={event.signals.deterministicScore.toFixed(3)} />
-                <Metric label="Heuristic" value={event.signals.heuristicScore.toFixed(3)} />
-                <Metric label="Profile" value={event.signals.profileScore.toFixed(3)} />
-              </div>
-              <div className="text-xs text-slate-400">Matched signatures: {event.matchedRules.length ? event.matchedRules.map((rule) => rule.ruleId).join(", ") : "none"}</div>
-              {event.anomalyFlags.length > 0 && <div className="text-xs text-amber-300">Anomalies: {event.anomalyFlags.join(", ")}</div>}
-            </section>}
-            {gatewayResult && <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-3">
-              <h2 className="font-semibold">Gateway response · HTTP {gatewayResult.status}</h2>
-              <p className="text-xs text-slate-400">Upstream mode: {gatewayResult.mode}</p>
-              <pre className="max-h-72 overflow-auto rounded-lg bg-slate-950 p-3 text-xs">{JSON.stringify(gatewayResult.body, null, 2)}</pre>
-            </section>}
+          <div className="space-y-4">
+            <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5" style={{ backgroundColor: "#0f172a" }}><h2 className="mb-4 flex items-center gap-2 font-semibold"><Activity className="h-4 w-4 text-cyan-300" />Runtime telemetry</h2><div className="grid grid-cols-2 gap-3"><Metric label="Requests" value={metrics.totalRequests} /><Metric label="Blocked" value={metrics.blocked} tone="rose" /><Metric label="Allowed" value={metrics.allowed} tone="green" /><Metric label="Monitored" value={metrics.monitored} tone="amber" /><Metric label="P50 inspection" value={`${metrics.p50LatencyMs.toFixed(2)} ms`} /><Metric label="P95 inspection" value={`${metrics.p95LatencyMs.toFixed(2)} ms`} /></div><p className="mt-3 text-[10px] text-slate-500">In-memory counts reset when the server restarts.</p></section>
+            <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5" style={{ backgroundColor: "#0f172a" }}><h2 className="mb-3 text-sm font-semibold">Inspection stages</h2><div className="space-y-2"><Flow icon={<Code2 className="h-4 w-4" />} title="Normalize" text="Decode, parse, and canonicalize request" /><Flow icon={<ShieldAlert className="h-4 w-4" />} title="Inspect" text="Apply deterministic signatures and heuristic score" /><Flow icon={<ShieldCheck className="h-4 w-4" />} title="Enforce policy" text={mode === "ENFORCING" ? "Block high risk or return a response" : "Record suspicious requests and continue"} /></div></section>
           </div>
-        )}
+        </div>
+        {result && <ResultPanel result={result} details={result.body && typeof result.body === "object" ? result.body as { reason?: string; matchedRules?: Array<{ id: string; category: string; description: string }> } : null} onDismiss={() => setResult(null)} />}
+        <RecentEvents events={events} />
+      </div>}
 
-        <section className="rounded-xl border border-slate-800 bg-slate-900 p-5">
-          <h2 className="mb-3 font-semibold">Recent security events</h2>
-          {recentEvents.length === 0 ? <p className="text-sm text-slate-500">No events recorded in this process yet.</p> : (
-            <div className="overflow-x-auto"><table className="w-full text-left text-xs">
-              <thead className="text-slate-500"><tr><th className="py-2 pr-3">Time</th><th className="py-2 pr-3">Method</th><th className="py-2 pr-3">Path</th><th className="py-2 pr-3">Decision</th><th className="py-2">Risk</th></tr></thead>
-              <tbody>{recentEvents.slice(0, 12).map((item) => <tr key={item.eventId} className="border-t border-slate-800"><td className="py-2 pr-3 text-slate-400">{new Date(item.timestamp).toLocaleTimeString()}</td><td className="py-2 pr-3">{item.method}</td><td className="py-2 pr-3 font-mono">{item.path}</td><td className={`py-2 pr-3 font-semibold ${decisionColor(item.decision)}`}>{item.decision}</td><td className="py-2">{item.riskScore.toFixed(3)}</td></tr>)}</tbody>
-            </table></div>
-          )}
+      {activeTab === "evaluation" && <div className="space-y-5"><PageHeading eyebrow="Evaluation" title="See what has actually been measured" text="Results below come from the small handcrafted smoke corpus or the reproducible dataset evaluator. Neither is a substitute for a licensed, application-held-out research dataset." />
+        <div className="grid gap-4 md:grid-cols-3"><InfoCard title="Live process" icon={<Activity className="h-5 w-5 text-cyan-300" />} value={`${metrics.totalRequests} requests`} text={`${metrics.blocked} blocked · ${metrics.allowed} allowed · counters reset with the server`} /><InfoCard title="Smoke corpus" icon={<ShieldCheck className="h-5 w-5 text-emerald-300" />} value={smokeReport?.unique_samples ? `${smokeReport.unique_samples} unique requests` : "Local regression check"} text={smokeReport?.evidence_scope || "Handcrafted examples only; regression evidence, not publication evidence."} /><InfoCard title="Research evaluation" icon={<Database className="h-5 w-5 text-indigo-300" />} value="Not run here" text="No licensed dataset or trained checkpoint is bundled with this checkout." /></div>
+        <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5" style={{ backgroundColor: "#0f172a" }}><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">Handcrafted smoke benchmark</h2><p className="mt-1 text-xs text-slate-400">Runs 29 unique examples. Repeated timing iterations measure runtime only; they are not extra examples.</p></div><button onClick={runSmoke} disabled={smokeBusy} className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold hover:border-indigo-400 disabled:opacity-50"><RefreshCw className={`h-3.5 w-3.5 ${smokeBusy ? "animate-spin" : ""}`} />{smokeBusy ? "Running…" : "Run smoke benchmark"}</button></div>
+          {smokeReport?.error && <Notice tone="rose">{smokeReport.error}</Notice>}{smokeReport?.message && <p className="mt-4 text-xs text-slate-400">{smokeReport.message}</p>}
+          {smokeReport?.metrics_by_lane && <><p className="mt-4 rounded-lg border border-amber-400/20 bg-amber-500/[0.06] p-3 text-[11px] text-amber-100">{smokeReport.evidence_scope || "Regression check on handcrafted examples only."} Do not cite these smoke results as research performance.</p><div className="mt-4 grid gap-3 md:grid-cols-3">{Object.entries(smokeReport.metrics_by_lane).map(([name, m]) => <article key={name} className="rounded-lg border border-slate-800 bg-slate-950 p-4"><h3 className="text-xs font-semibold text-slate-200">{name.replaceAll("_", " ")}</h3><p className="mt-1 text-[10px] text-slate-500">n = {m.n} unique requests</p><div className="mt-3 grid grid-cols-2 gap-2 text-[11px]"><Stat label="Accuracy" value={pct(m.accuracy)} /><Stat label="Precision" value={pct(m.precision)} /><Stat label="Recall" value={pct(m.recall)} /><Stat label="F1" value={pct(m.f1_score)} /><Stat label="FPR" value={pct(m.fpr)} /><Stat label="FNR" value={pct(m.fnr)} /></div></article>)}</div></>}
         </section>
+        <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5" style={{ backgroundColor: "#0f172a" }}><h2 className="font-semibold">Publication-grade workflow</h2><ol className="mt-3 grid gap-3 text-xs text-slate-300 md:grid-cols-3"><li className="rounded-lg bg-slate-950 p-3"><b className="text-indigo-300">1 · Prepare</b><p className="mt-1 text-slate-400">Document sources, licenses, labels, hashes, and application grouping.</p></li><li className="rounded-lg bg-slate-950 p-3"><b className="text-indigo-300">2 · Split</b><p className="mt-1 text-slate-400">Deduplicate requests and hold out entire applications or attack families.</p></li><li className="rounded-lg bg-slate-950 p-3"><b className="text-indigo-300">3 · Compare</b><p className="mt-1 text-slate-400">Run rules, heuristic, trained model, and CRS baseline with confidence intervals.</p></li></ol><p className="mt-3 text-[11px] text-slate-500">Commands and limitations are in <code>research/PUBLICATION_READINESS.md</code> and the README.</p></section>
+      </div>}
 
-        <section className="grid gap-3 sm:grid-cols-3 text-xs text-slate-300">
-          <StatusCard title="Scoring" body="Handcrafted lexical/entropy heuristic plus deterministic signatures; no neural checkpoint loaded." />
-          <StatusCard title="Evaluation" body="Use scripts/evaluate_dataset.py with licensed data and grouped splits. The local smoke corpus is regression-only." />
-          <StatusCard title="Gateway" body="UPSTREAM_URL enables a single-origin proxy. Without it, the response is marked mock-demo and is not forwarded." />
+      {activeTab === "adaptation" && <div className="space-y-5"><PageHeading eyebrow="Few-Shot Adaptation · Demo" title="Demonstrate profile adaptation" text="The current profile feature adapts route expectations from generated synthetic request samples. It illustrates the software path; it is not a measured few-shot research result." />
+        <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5" style={{ backgroundColor: "#0f172a" }}><h2 className="font-semibold">Select a synthetic sample budget</h2><p className="mt-1 text-xs text-slate-400">This endpoint creates local example requests for five demonstration routes.</p><div className="mt-4 flex flex-wrap gap-2">{[0, 100, 500, 1000].map((n) => <button key={n} onClick={() => adapt(n)} className={`rounded-lg border px-4 py-2 text-xs font-semibold ${budget === n ? "border-indigo-400 bg-indigo-600 text-white" : "border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-500"}`}>{n} samples</button>)}</div>
+          {adaptResult && <div className={`mt-4 rounded-lg border p-4 text-xs ${adaptResult.error ? "border-rose-400/30 bg-rose-500/[0.06] text-rose-100" : "border-emerald-400/20 bg-emerald-500/[0.05] text-emerald-100"}`}>{adaptResult.error ? adaptResult.error : <><b>Profile updated with synthetic demo samples.</b><p className="mt-1 text-slate-300">Budget: {adaptResult.adaptationBudget} · profile routes: {adaptResult.knownEndpointsCount} · evidence type: {adaptResult.evidenceType}</p><p className="mt-1 text-amber-200">This is an interactive software demonstration, not experimental evidence.</p></>}</div>}
         </section>
-      </main>
-    </div>
-  );
+        <div className="grid gap-4 md:grid-cols-2"><InfoCard title="What the profile tracks" icon={<Cpu className="h-5 w-5 text-indigo-300" />} value="Routes and request shape" text="Known paths, methods, parameter names, and simple payload length summaries." /><InfoCard title="What this does not establish" icon={<AlertTriangle className="h-5 w-5 text-amber-300" />} value="No measured FPR reduction" text="There is no real application traffic, held-out deployment, or comparative adaptation study bundled." /></div>
+      </div>}
+
+      {activeTab === "robustness" && <div className="space-y-5"><PageHeading eyebrow="Robustness & Evasion" title="Try representative attack and benign requests" text="These are interactive regression examples, not a comprehensive evasion test suite. Choose a vector to load it into the live gateway." />
+        <section className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80" style={{ backgroundColor: "#0f172a" }}><div className="border-b border-slate-800 p-4"><h2 className="font-semibold">Request examples</h2><p className="mt-1 text-xs text-slate-400">Running an example sends it once through the local gateway.</p></div><div className="divide-y divide-slate-800">{demoCases.map((demo) => <div key={demo.id} className="flex flex-wrap items-center justify-between gap-3 p-4"><div><span className={`text-[9px] font-bold uppercase ${demo.attack ? "text-rose-300" : "text-emerald-300"}`}>{demo.attack ? "Attack sample" : "Benign sample"}</span><h3 className="mt-1 text-sm font-semibold">{demo.title}</h3><p className="mt-1 text-[11px] text-slate-400">{demo.note}</p><code className="mt-1 block break-all text-[10px] text-slate-500">{demo.method} {demo.target}</code></div><button onClick={() => chooseDemo(demo, true)} className="flex shrink-0 items-center gap-2 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 hover:border-indigo-400"><ArrowRight className="h-3.5 w-3.5" />Try in gateway</button></div>)}</div></section>
+        <Notice tone="amber">A payload being blocked only confirms behavior for that example. It does not establish general attack detection or bypass resistance.</Notice>
+      </div>}
+
+      {activeTab === "dataset" && <div className="space-y-5"><PageHeading eyebrow="Data & Provenance" title="Make evaluation traceable" text="The checkout contains evaluation tooling and a manifest template, but does not include the licensed research datasets or a trained model checkpoint." />
+        <div className="grid gap-4 md:grid-cols-3"><InfoCard title="Dataset files" icon={<Database className="h-5 w-5 text-indigo-300" />} value="Not included" text="Obtain and store licensed data locally. Do not commit private or restricted corpora." /><InfoCard title="Split tooling" icon={<Layers className="h-5 w-5 text-cyan-300" />} value="Included" text="Canonical deduplication and group-held-out split generation are available in scripts/." /><InfoCard title="Model artifact" icon={<Cpu className="h-5 w-5 text-amber-300" />} value="Not included" text="The running score is a handcrafted heuristic; no neural checkpoint is loaded." /></div>
+        <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5" style={{ backgroundColor: "#0f172a" }}><h2 className="font-semibold">Provenance checklist</h2><div className="mt-3 grid gap-2 sm:grid-cols-2">{["Source and version", "License and permitted use", "Retrieval date and source hash", "Label definitions and audit method", "Application or attack-family group field", "Train, validation, and test assignment hash"].map((item) => <div key={item} className="flex items-center gap-2 rounded-lg bg-slate-950 p-3 text-xs text-slate-300"><CheckCircle2 className="h-4 w-4 text-cyan-300" />{item}</div>)}</div><p className="mt-4 text-xs text-slate-400">Start with <code>research/dataset_manifest.example.json</code>. The manifest is a template, not evidence that a dataset has been obtained or evaluated.</p></section>
+      </div>}
+
+      {activeTab === "research" && <div className="space-y-5"><PageHeading eyebrow="Research Manuscript · Draft Notes" title="Describe the current system accurately" text="Use this page as a project overview and a checklist for building defensible publication claims." />
+        <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5" style={{ backgroundColor: "#0f172a" }}><h2 className="font-semibold">Current implementation</h2><div className="mt-4 grid gap-3 md:grid-cols-2"><ResearchRow title="Canonicalization" detail="Bounded URL decoding, path normalization, and basic HTTP request parsing." /><ResearchRow title="Detection" detail="Handwritten deterministic signatures plus a lexical/entropy heuristic." /><ResearchRow title="Application profile" detail="In-memory route and request-shape demo, adaptable with synthetic samples." /><ResearchRow title="Gateway" detail="WAF checks requests before a mock response or configured single-origin upstream." /></div><div className="mt-4 rounded-lg border border-amber-400/20 bg-amber-500/[0.06] p-3 text-xs leading-5 text-amber-100">This is an academic prototype. The bundled score is not a trained Transformer, calibrated probability, or production validation.</div></section>
+        <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5" style={{ backgroundColor: "#0f172a" }}><h2 className="font-semibold">Before writing a results section</h2><ol className="mt-3 space-y-2 text-xs text-slate-300">{["Choose datasets whose licenses permit the intended research and publication.", "Deduplicate canonical requests before creating group-isolated splits.", "Train and retain a documented model checkpoint, if making Transformer claims.", "Compare the same held-out requests against rules-only, heuristic, trained model, and CRS.", "Report per-category errors, cluster-bootstrap intervals, thresholds, and runtime conditions.", "Keep smoke tests clearly labeled as regression checks, separate from research evaluation."].map((x, i) => <li key={x} className="flex gap-2"><span className="font-mono text-indigo-300">0{i + 1}</span><span>{x}</span></li>)}</ol><p className="mt-4 text-xs text-slate-500">Detailed workflow: <code>research/PUBLICATION_READINESS.md</code>.</p></section>
+      </div>}
+    </main>
+    <footer className="border-t border-slate-800 bg-slate-900/70"><div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-4 text-[10px] text-slate-500 sm:px-6"><span>AppAware-WAF · academic prototype · local in-memory telemetry</span><details><summary className="flex cursor-pointer items-center gap-1.5 text-slate-400"><LockKeyhole className="h-3.5 w-3.5" /> Management API key</summary><label className="mt-2 flex items-center gap-2">If configured<input type="password" autoComplete="off" value={adminToken} onChange={(e) => setAdminToken(e.target.value)} placeholder="WAF_ADMIN_TOKEN" className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white" /></label></details></div></footer>
+  </div>;
 }
 
-function Metric({ label, value }: { label: string; value: string | number }) {
-  return <div className="rounded-lg border border-slate-800 bg-slate-950 p-3"><div className="text-[11px] text-slate-500">{label}</div><div className="mt-1 font-mono font-semibold text-slate-100">{value}</div></div>;
-}
-
-function StatusCard({ title, body }: { title: string; body: string }) {
-  return <article className="rounded-xl border border-slate-800 bg-slate-900 p-4"><h3 className="mb-1 font-semibold text-white">{title}</h3><p className="leading-relaxed text-slate-400">{body}</p></article>;
-}
+function PageHeading({ eyebrow, title, text }: { eyebrow: string; title: string; text: string }) { return <div className="rounded-xl border border-slate-800 bg-gradient-to-r from-indigo-950/50 to-slate-900/70 p-5 sm:p-6"><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-indigo-300">{eyebrow}</p><h1 className="mt-2 text-xl font-bold tracking-tight text-white sm:text-2xl">{title}</h1><p className="mt-2 max-w-3xl text-xs leading-5 text-slate-400">{text}</p></div>; }
+function Notice({ tone, children }: { tone: "amber" | "rose"; children: React.ReactNode }) { return <p className={`rounded-lg border p-3 text-xs ${tone === "amber" ? "border-amber-400/25 bg-amber-500/[0.06] text-amber-100" : "border-rose-400/25 bg-rose-500/[0.06] text-rose-100"}`}>{children}</p>; }
+function Metric({ label, value, tone }: { label: string; value: number | string; tone?: "rose" | "green" | "amber" }) { const c = tone === "rose" ? "text-rose-300" : tone === "green" ? "text-emerald-300" : tone === "amber" ? "text-amber-200" : "text-white"; return <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3"><div className="text-[10px] text-slate-500">{label}</div><div className={`mt-1 font-mono text-sm font-semibold ${c}`}>{value}</div></div>; }
+function Flow({ icon, title, text }: { icon: React.ReactNode; title: string; text: string }) { return <div className="flex items-center gap-3 rounded-lg bg-slate-950/70 p-3"><span className="text-indigo-300">{icon}</span><span className="min-w-24 text-xs font-semibold text-slate-200">{title}</span><span className="text-[11px] text-slate-500">{text}</span></div>; }
+function ResultPanel({ result, details, onDismiss }: { result: GatewayResult; details: { reason?: string; matchedRules?: Array<{ id: string; category: string; description: string }> } | null; onDismiss: () => void }) { const blocked = result.decision === "BLOCK"; const monitored = result.decision === "MONITOR"; const colorClass = blocked ? "border-rose-400/30 bg-rose-500/[0.06]" : monitored ? "border-amber-400/30 bg-amber-500/[0.06]" : "border-emerald-400/30 bg-emerald-500/[0.06]"; return <section aria-live="polite" className={`rounded-xl border p-5 ${colorClass}`}><div className="flex items-start justify-between"><div className="flex items-center gap-2">{blocked ? <ShieldAlert className="h-5 w-5 text-rose-300" /> : <CheckCircle2 className="h-5 w-5 text-emerald-300" />}<h2 className={`text-lg font-bold ${blocked ? "text-rose-200" : monitored ? "text-amber-200" : "text-emerald-200"}`}>{blocked ? "Request blocked" : monitored ? "Request monitored" : "Request allowed"} · HTTP {result.status}</h2></div><button aria-label="Dismiss result" onClick={onDismiss} className="rounded p-1 text-slate-400 hover:bg-slate-800"><X className="h-4 w-4" /></button></div><p className="mt-1 font-mono text-[11px] text-slate-400">{result.method} {result.target}</p><div className="my-4 grid grid-cols-2 gap-3 border-y border-slate-700 py-3 sm:grid-cols-4"><Stat label="Decision" value={result.decision} /><Stat label="Risk score" value={result.risk === null ? "—" : `${(result.risk * 100).toFixed(0)} / 100`} /><Stat label="Gateway" value={result.mode === "mock-demo" ? "Mock demo" : result.mode} /><Stat label="Event ID" value={result.eventId} /></div><div className="grid gap-4 md:grid-cols-2"><div><p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Inspection outcome</p><p className="mt-2 text-xs text-slate-300">Request received <ArrowRight className="inline h-3 w-3" /> Signatures + heuristic <ArrowRight className="inline h-3 w-3" /> {blocked ? "Stopped at WAF" : result.mode === "mock-demo" ? "Mock response returned" : "Forwarded upstream"}</p>{details?.reason && <p className="mt-2 text-xs text-slate-300">{details.reason}</p>}{details?.matchedRules?.map((r) => <span key={r.id} title={r.description} className="mr-1 mt-2 inline-block rounded border border-rose-400/20 bg-rose-500/10 px-2 py-1 text-[10px] text-rose-200">{r.id} · {r.category}</span>)}</div><div><p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Gateway response</p><pre className="max-h-48 overflow-auto rounded-lg bg-slate-950 p-3 text-[10px] text-slate-300">{JSON.stringify(result.body, null, 2)}</pre></div></div></section>; }
+function RecentEvents({ events }: { events: SecurityEvent[] }) { return <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5"><h2 className="mb-3 font-semibold">Recent security events</h2>{events.length === 0 ? <div className="rounded-lg border border-dashed border-slate-700 py-6 text-center text-xs text-slate-500">Send a request through the gateway to see its event here.<ArrowDown className="mx-auto mt-2 h-4 w-4" /></div> : <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-left text-xs"><thead className="text-slate-500"><tr><th className="py-2">Time</th><th>Request</th><th>Decision</th><th className="text-right">Risk</th></tr></thead><tbody>{events.slice(0, 10).map((e) => <tr key={e.eventId} className="border-t border-slate-800"><td className="py-2 pr-3 text-slate-500">{new Date(e.timestamp).toLocaleTimeString()}</td><td className="max-w-[360px] truncate py-2 pr-3 font-mono">{e.method} {e.path}</td><td className={e.decision === "BLOCK" ? "text-rose-300" : e.decision === "MONITOR" ? "text-amber-200" : "text-emerald-300"}>{e.decision}</td><td className="text-right font-mono">{(e.riskScore * 100).toFixed(0)}</td></tr>)}</tbody></table></div>}</section>; }
+function InfoCard({ title, icon, value, text }: { title: string; icon: React.ReactNode; value: string; text: string }) { return <article className="rounded-xl border border-slate-800 bg-slate-900/80 p-5"><div className="flex items-center gap-2">{icon}<h2 className="text-xs font-semibold text-slate-200">{title}</h2></div><p className="mt-3 text-lg font-bold text-white">{value}</p><p className="mt-1 text-xs leading-5 text-slate-400">{text}</p></article>; }
+function Stat({ label, value }: { label: string; value: string }) { return <div><div className="text-[10px] text-slate-500">{label}</div><div className="mt-1 truncate text-xs font-semibold text-slate-200">{value}</div></div>; }
+function ResearchRow({ title, detail }: { title: string; detail: string }) { return <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3"><h3 className="text-xs font-semibold text-indigo-200">{title}</h3><p className="mt-1 text-[11px] leading-4 text-slate-400">{detail}</p></div>; }
+function pct(value: number | null | undefined) { return value === null || value === undefined ? "n/a" : `${(value * 100).toFixed(2)}%`; }
