@@ -347,7 +347,7 @@ async function startServer() {
   }
 
   app.listen(port, "0.0.0.0", () => {
-    console.log(`[AppAware-WAF] Server & Reverse Proxy running at http://0.0.0.0:${port}`);
+    console.log(`[AppAware-WAF] Server & Reverse Proxy running at http://localhost:${port}`);
     console.log(`[AppAware-WAF] Reverse Proxy Gateway live on /proxy/*`);
   });
 }
