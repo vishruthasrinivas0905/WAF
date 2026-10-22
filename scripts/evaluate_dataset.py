@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -181,8 +182,40 @@ def cluster_bootstrap_ci(rows: list[dict[str, Any]], predicted: list[int], seed:
     return intervals
 
 
+def load_baseline_sidecar(spec: str) -> tuple[str, Path, dict[str, int], str, dict[str, Any]]:
+    if "=" not in spec:
+        raise ValueError("Baseline sidecars must use NAME=PATH syntax.")
+    name, filename = spec.split("=", 1)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", name):
+        raise ValueError(f"Invalid baseline name {name!r}; use letters, digits, underscore, or hyphen.")
+    path = Path(filename)
+    prediction_map: dict[str, int] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if not {"request_sha256", "prediction"}.issubset(set(reader.fieldnames or [])):
+            raise ValueError(f"Baseline sidecar {path} must contain request_sha256,prediction columns.")
+        for row_number, row in enumerate(reader, start=2):
+            fingerprint = (row.get("request_sha256") or "").strip().lower()
+            value = (row.get("prediction") or "").strip()
+            if not re.fullmatch(r"[0-9a-f]{64}", fingerprint) or value not in {"0", "1"}:
+                raise ValueError(f"Invalid request hash or binary prediction in {path}, row {row_number}.")
+            if fingerprint in prediction_map:
+                raise ValueError(f"Duplicate request hash in baseline sidecar {path}, row {row_number}.")
+            prediction_map[fingerprint] = int(value)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    metadata_path = path.with_suffix(path.suffix + ".metadata.json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    return name, path, prediction_map, digest, metadata
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     examples, dataset_hash, duplicate_count = load_examples(args)
+    baselines: dict[str, dict[str, Any]] = {}
+    for spec in args.baseline_scores:
+        name, path, prediction_map, digest, metadata = load_baseline_sidecar(spec)
+        if name in baselines:
+            raise ValueError(f"Duplicate baseline name: {name}")
+        baselines[name] = {"path": path, "predictions": prediction_map, "sha256": digest, "metadata": metadata}
     if args.model_scores_csv:
         score_map: dict[str, float] = {}
         with args.model_scores_csv.open("r", encoding="utf-8-sig", newline="") as stream:
@@ -205,7 +238,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     train_rows, validation_rows, test_rows, validation_groups, test_groups = grouped_split(examples, args.test_size, args.validation_size, args.seed)
     has_model_scores = bool(args.model_score_column or args.model_scores_csv)
     if has_model_scores and any(row["model_score"] is None for row in test_rows):
-        raise ValueError("Every held-out test row needs a finite external model score when --model-score-column is set.")
+        raise ValueError("Every held-out test row needs a finite external model score when external model scores are enabled.")
+    for name, baseline in baselines.items():
+        missing = [row["fingerprint"] for row in test_rows if row["fingerprint"] not in baseline["predictions"]]
+        if missing:
+            raise ValueError(f"Baseline {name!r} is missing predictions for {len(missing)} held-out test rows.")
     scorer = create_default_scorer()
     rule_engine = DeterministicRuleEngine()
     profile_engine = ApplicationProfileEngine(app_id="group-held-out-evaluation")
@@ -216,6 +253,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if has_model_scores:
         lanes["external_model_only"] = []
         lanes["hybrid_rules_external_model"] = []
+    for name in baselines:
+        lanes[f"baseline_{name}"] = []
     prediction_rows: list[dict[str, Any]] = []
 
     for row in test_rows:
@@ -243,6 +282,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             model_event = model_pipeline.inspect_request(row["raw_request"])
             predictions["hybrid_rules_external_model"] = int(model_event["decision"] == "BLOCK")
+        for name, baseline in baselines.items():
+            predictions[f"baseline_{name}"] = baseline["predictions"][row["fingerprint"]]
 
         for lane, prediction in predictions.items():
             lanes[lane].append(prediction)
@@ -297,6 +338,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "external_model": args.model_score_column or (args.model_scores_csv.name if args.model_scores_csv else None),
             "heuristic_threshold": args.heuristic_threshold,
             "model_threshold": args.model_threshold if has_model_scores else None,
+            "baseline_sidecars": {
+                name: {"file": info["path"].name, "sha256": info["sha256"], "metadata": info["metadata"]}
+                for name, info in baselines.items()
+            },
             "policy": "bundled deterministic/risk policy; thresholds fixed before evaluation",
         },
         "confidence_intervals": {
@@ -343,6 +388,7 @@ def main() -> None:
     parser.add_argument("--category-column", default="category", help="Per-category analysis; optional if column is absent")
     parser.add_argument("--model-score-column", help="Optional precomputed external model probability column")
     parser.add_argument("--model-scores-csv", type=Path, help="Optional sidecar with request_sha256,model_score columns (for train_transformer.py output)")
+    parser.add_argument("--baseline-scores", action="append", default=[], metavar="NAME=CSV", help="Optional external WAF sidecar with request_sha256,prediction columns; repeat for multiple baselines")
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--validation-size", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)

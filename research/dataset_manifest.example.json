@@ -44,6 +44,14 @@
     "command": "python scripts/evaluate_dataset.py DATA.csv --group-column application",
     "score_thresholds_selected_on": "validation split only",
     "confidence_interval_method": "cluster bootstrap over held-out groups",
+    "external_baselines": [
+      {
+        "name": "OWASP CRS",
+        "image": "owasp/modsecurity-crs:4.30.0-nginx-202610180210@sha256:7698c48a41a43138ae317feeec964d1515b861cc1d9e50617bc1cdfe9f314e1d",
+        "configuration": "BLOCKING_PARANOIA=1; detection paranoia=1; report non-default overrides",
+        "prediction_sidecar_sha256": null
+      }
+    ],
     "hardware": null,
     "operating_system": null,
     "python_version": null,

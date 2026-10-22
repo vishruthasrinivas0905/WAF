@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ============================================================================
   # 1. AppAware WAF Gateway (Reverse Proxy & Deep Inspection Engine)
@@ -33,11 +31,29 @@ services:
   # 2. Live Vulnerable Upstream Target (OWASP Juice Shop)
   # ============================================================================
   upstream-vulnerable-app:
-    image: bkimminich/juice-shop:latest
+    image: bkimminich/juice-shop:v20.3.0
     container_name: juice_shop_upstream
     restart: unless-stopped
     expose:
       - "3000"
+    networks:
+      - waf_net
+
+  # Official OWASP CRS reference baseline for controlled evaluation only.
+  crs-baseline:
+    image: owasp/modsecurity-crs:4.30.0-nginx-202610180210@sha256:7698c48a41a43138ae317feeec964d1515b861cc1d9e50617bc1cdfe9f314e1d
+    profiles: [baseline]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      BACKEND: http://upstream-vulnerable-app:3000
+      PORT: 8080
+      MODSEC_RULE_ENGINE: "On"
+      BLOCKING_PARANOIA: 1
+      DETECTION_PARANOIA: 1
+    depends_on:
+      - upstream-vulnerable-app
     networks:
       - waf_net
 

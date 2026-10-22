@@ -23,6 +23,7 @@ Required columns default to `request`, `is_attack`, and the explicitly named gro
 1. Canonicalizes requests, hashes the canonical text, removes exact canonical duplicates, and stops on contradictory labels.
 2. Creates a seeded group-held-out train/validation/test split; no group value crosses splits. Both labels must appear in train and validation; the test fold prefers both labels but can be single-class for attack-family generalization. Undefined class-specific rates remain null. `scripts/create_group_splits.py` exports the CSVs expected by the optional training script and writes hash-based split assignments.
 3. Compares rules-only, heuristic-only, and hybrid decisions. If external model scores are supplied as a column or hash-keyed sidecar, it also reports model-only and model-plus-rules lanes.
+   External WAF baselines can be replayed with `scripts/score_http_baseline.py`; its hash-keyed binary sidecar is accepted through repeated `--baseline-scores NAME=CSV` options. The scorer ignores labels and defaults to loopback-only targets.
 4. Writes an aggregate report and test prediction CSV with request hashes rather than payload text.
 5. Computes 95% percentile cluster-bootstrap intervals over held-out groups. Intervals are unavailable with fewer than two test groups; confidence improves with more independent groups.
 
@@ -39,6 +40,7 @@ No model is bundled by default. The runtime fallback is explicitly a heuristic. 
 - Set `WAF_TRUST_PROXY` only to explicit IP/CIDR ranges for proxy servers you control. Do not use `true`. With no trusted proxy configured, forwarded client-IP headers are ignored.
 - The compose stack uses a local demo vulnerable target. Isolate it; do not expose it as a public service.
 - Pin the vulnerable upstream image to a reviewed version or digest before a reproducible deployment.
+- For comparative evaluation, run the optional official OWASP CRS Compose profile on loopback, record the exact image tag and paranoia settings, and keep its hash-keyed decision sidecar plus metadata with the evaluation report.
 
 ## Publication claims to hold until evidence exists
 

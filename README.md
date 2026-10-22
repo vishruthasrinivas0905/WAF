@@ -100,6 +100,30 @@ python scripts/evaluate_dataset.py .\private-data\requests.csv --group-column ap
 
 The evaluator uses the same deterministic split procedure, compares rules-only, heuristic-only, and hybrid decisions, reports per-category results, and calculates cluster-bootstrap confidence intervals over test groups. Replace `0.50` with the threshold selected on validation data. `train_transformer.py` writes a test-only model-score sidecar keyed by canonical request SHA-256. The evaluator does not train a Transformer, and its heuristic lane is not a model result. See [PUBLICATION_READINESS.md](research/PUBLICATION_READINESS.md) for requirements and limits.
 
+### Compare an OWASP CRS baseline
+
+The optional `baseline` Compose profile runs the official OWASP ModSecurity CRS image alongside the isolated Juice Shop target. It binds only to loopback. Compose pins Juice Shop to a versioned tag and CRS to a dated tag plus image-index digest. The CRS project documents its [official container images and tag formats](https://github.com/coreruleset/modsecurity-crs-docker).
+
+Start the reference baseline and its backend:
+
+```powershell
+docker compose --profile baseline up -d upstream-vulnerable-app crs-baseline
+```
+
+Replay a licensed corpus only against this local baseline, writing hash keyed decisions without reading labels:
+
+```powershell
+python scripts/score_http_baseline.py .\private-data\requests.csv --base-url http://127.0.0.1:8081 --engine-id owasp/modsecurity-crs:4.30.0-nginx-202610180210@sha256:7698c48a41a43138ae317feeec964d1515b861cc1d9e50617bc1cdfe9f314e1d --block-statuses 403 --output .\private-data\crs_predictions.csv
+```
+
+Add the baseline lane to the same group-held-out evaluation:
+
+```powershell
+python scripts/evaluate_dataset.py .\private-data\requests.csv --group-column application --category-column category --baseline-scores crs=.\private-data\crs_predictions.csv
+```
+
+The scorer sends requests to the local WAF and counts the configured HTTP status codes as blocks; verify those statuses against the selected engine and backend. Preserve the emitted metadata JSON with the report. Results depend on CRS version, paranoia level, and deployment settings, so record those alongside metrics.
+
 ---
 
 ## 4. Local Execution & Testing (Windows PowerShell)

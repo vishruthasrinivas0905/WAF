@@ -31,7 +31,7 @@ WAF_TRUST_PROXY=<optional trusted proxy IPs/CIDRs, comma-separated>
 ## Docker Compose demo
 
 1. Create an untracked `.env` file with a random `WAF_ADMIN_TOKEN` at least 32 characters long.
-2. Review and pin the Juice Shop image to a version or digest before sharing the environment.
+2. Compose pins the demo target to a versioned Juice Shop image tag. Record the image digest as well when archiving a publication run.
 3. Start the isolated demo:
 
 ```powershell
@@ -49,6 +49,16 @@ python scripts/evaluate_dataset.py .\private-data\requests.csv --group-column ap
 ```
 
 The evaluator writes `evaluation_results/evaluation_report.json`, `test_predictions.csv`, and `split_assignments.csv`. It removes canonical duplicates before a group-held-out train/validation/test split and compares rules-only, heuristic-only, and hybrid lanes. Supply optional trained-model results using `--model-scores-csv` and a validation-selected `--model-threshold`. This runner does not train a Transformer. Read [research/PUBLICATION_READINESS.md](research/PUBLICATION_READINESS.md) before interpreting metrics.
+
+To add the isolated OWASP CRS reference baseline, start the optional Compose profile and replay your licensed corpus through its loopback listener:
+
+```powershell
+docker compose --profile baseline up -d upstream-vulnerable-app crs-baseline
+python scripts/score_http_baseline.py .\private-data\requests.csv --base-url http://127.0.0.1:8081 --engine-id owasp/modsecurity-crs:4.30.0-nginx-202610180210@sha256:7698c48a41a43138ae317feeec964d1515b861cc1d9e50617bc1cdfe9f314e1d --output .\private-data\crs_predictions.csv
+python scripts/evaluate_dataset.py .\private-data\requests.csv --group-column application --baseline-scores crs=.\private-data\crs_predictions.csv
+```
+
+The reference image and Juice Shop tag are version-pinned in Compose. Record image digests, CRS paranoia level, and block status mapping with any published report. Only use the replay tool with a local WAF or infrastructure you control.
 
 ## Limits
 
