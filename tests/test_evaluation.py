@@ -78,7 +78,8 @@ class TestEvaluationHelpers(unittest.TestCase):
 
             report = run(argparse.Namespace(
                 csv=dataset, request_column="request", label_column="is_attack", group_column="application",
-                category_column="category", model_score_column=None, model_scores_csv=None,
+                fingerprint_column=None, category_column="category", model_score_column=None, model_scores_csv=None,
+                fixed_test_split=False, split_manifest=None,
                 baseline_scores=[f"crs={scores}"], test_size=0.2, validation_size=0.1, seed=42,
                 heuristic_threshold=0.7, model_threshold=0.5, bootstrap_iterations=100, output_dir=work / "out",
             ))
