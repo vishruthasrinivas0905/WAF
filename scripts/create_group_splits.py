@@ -24,6 +24,7 @@ def main() -> None:
     parser.add_argument("--request-column", default="request")
     parser.add_argument("--label-column", default="is_attack")
     parser.add_argument("--category-column", default="category")
+    parser.add_argument("--fingerprint-column", default=None, help="Optional canonical SHA-256 column to avoid reparsing requests")
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--validation-size", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -38,6 +39,7 @@ def main() -> None:
         label_column=args.label_column,
         group_column=args.group_column,
         category_column=args.category_column,
+        fingerprint_column=args.fingerprint_column,
         model_score_column=None,
     )
     examples, source_hash, duplicates = load_examples(loader_args)
@@ -56,10 +58,10 @@ def main() -> None:
         split_label = {"transformer_train.csv": "train", "transformer_val.csv": "validation", "transformer_test.csv": "test"}[split_name]
         out_path = args.output_dir / split_name
         with out_path.open("w", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=["request", "is_attack", "group", "category"])
+            writer = csv.DictWriter(stream, fieldnames=["request", "is_attack", "group", "request_sha256", "category"])
             writer.writeheader()
             for row in rows:
-                writer.writerow({"request": row["raw_request"], "is_attack": row["label"], "group": row["group"], "category": row["category"]})
+                writer.writerow({"request": row["raw_request"], "is_attack": row["label"], "group": row["group"], "request_sha256": row["fingerprint"], "category": row["category"]})
                 assignments.append({"request_sha256": row["fingerprint"], "group": row["group"], "split": split_label})
 
     with (args.output_dir / "split_assignments.csv").open("w", newline="", encoding="utf-8") as stream:

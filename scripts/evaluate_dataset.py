@@ -21,6 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Some reconstructed HTTP bodies exceed Python's conservative 128 KiB CSV
+# default. The source file is local input and rows remain otherwise bounded by
+# memory as one streaming CSV record at a time.
+csv.field_size_limit(2**31 - 1)
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -51,6 +56,8 @@ def load_examples(args: argparse.Namespace) -> tuple[list[dict[str, Any]], str, 
     with args.csv.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
         required = {args.request_column, args.label_column, args.group_column}
+        if args.fingerprint_column:
+            required.add(args.fingerprint_column)
         missing = required - set(reader.fieldnames or [])
         if missing:
             raise ValueError(f"CSV missing required columns: {', '.join(sorted(missing))}")
@@ -66,9 +73,14 @@ def load_examples(args: argparse.Namespace) -> tuple[list[dict[str, Any]], str, 
                 raise ValueError(f"CSV row {row_number} has an empty request or group value.")
 
             label = parse_label(row.get(args.label_column) or "")
-            parsed = canonicalizer.parse_raw_http_request(raw_request)
-            canonical_text = parsed["canonical_text"]
-            fingerprint = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+            if args.fingerprint_column:
+                fingerprint = (row.get(args.fingerprint_column) or "").strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+                    raise ValueError(f"Invalid canonical fingerprint on CSV row {row_number}.")
+            else:
+                parsed = canonicalizer.parse_raw_http_request(raw_request)
+                canonical_text = parsed["canonical_text"]
+                fingerprint = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
             model_score = None
             if args.model_score_column:
                 raw_model_score = (row.get(args.model_score_column) or "").strip()
@@ -235,7 +247,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 score_map[fingerprint] = score
         for example in examples:
             example["model_score"] = score_map.get(example["fingerprint"])
-    train_rows, validation_rows, test_rows, validation_groups, test_groups = grouped_split(examples, args.test_size, args.validation_size, args.seed)
+    if args.fixed_test_split:
+        train_rows, validation_rows, test_rows = [], [], examples
+        validation_groups = []
+        test_groups = sorted({row["group"] for row in test_rows})
+    else:
+        train_rows, validation_rows, test_rows, validation_groups, test_groups = grouped_split(examples, args.test_size, args.validation_size, args.seed)
     has_model_scores = bool(args.model_score_column or args.model_scores_csv)
     if has_model_scores and any(row["model_score"] is None for row in test_rows):
         raise ValueError("Every held-out test row needs a finite external model score when external model scores are enabled.")
@@ -325,13 +342,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "dataset_sha256": dataset_hash,
         "deduplication": {"method": "SHA-256 of canonical request text", "duplicates_removed": duplicate_count, "unique_rows": len(examples)},
         "split": {
-            "method": "group-held-out train/validation/test", "group_column": args.group_column,
+            "method": "precomputed fixed held-out test partition" if args.fixed_test_split else "group-held-out train/validation/test", "group_column": args.group_column,
             "test_size_requested": args.test_size, "validation_size_requested": args.validation_size, "random_seed": args.seed,
             "train_rows": len(train_rows), "validation_rows": len(validation_rows), "test_rows": len(test_rows),
             "train_groups": len({row["group"] for row in train_rows}), "validation_groups": len(validation_groups), "test_groups": len(test_groups),
-            "validation_group_values": validation_groups,
-            "test_group_values": test_groups,
+            "validation_group_values_sha256": hashlib.sha256("\n".join(validation_groups).encode("utf-8")).hexdigest(),
+            "test_group_values_sha256": hashlib.sha256("\n".join(test_groups).encode("utf-8")).hexdigest(),
             "test_label_classes": sorted({row["label"] for row in test_rows}),
+            "split_manifest": json.loads(args.split_manifest.read_text(encoding="utf-8")) if args.split_manifest else None,
         },
         "score_method": {
             "heuristic": "bundled lexical/entropy heuristic; not a trained model",
@@ -345,16 +363,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "policy": "bundled deterministic/risk policy; thresholds fixed before evaluation",
         },
         "confidence_intervals": {
-            "method": "percentile cluster bootstrap over test groups",
+            "method": "percentile cluster bootstrap over test groups" if not args.fixed_test_split else "percentile request-level bootstrap; one canonical host-aware request per group",
             "iterations": args.bootstrap_iterations,
-            "note": "Intervals are unavailable with fewer than two held-out groups; single-class test partitions leave class-specific rates undefined.",
+            "note": "Intervals measure variation over held-out requests and do not capture application/site-to-site variation." if args.fixed_test_split else "Intervals are unavailable with fewer than two held-out groups; single-class test partitions leave class-specific rates undefined.",
         },
         "results": metrics,
         "per_category_test_results": category_report,
         "limitations": [
             "This script evaluates existing scores and rules; it does not train a Transformer.",
             "Train external models on train groups, select thresholds on validation groups, and generate test scores without test-label access.",
-            "Group split quality depends on the supplied grouping key and dataset provenance.",
+            "WAMM does not provide a reliable application-family group field; the reported random request-level holdout does not measure cross-application generalization.",
+            "The source dataset's own documentation describes a mixture of captured benign requests and generated/scanner attack traffic; these sources are not equivalent to naturally occurring production attacks.",
+            "The external Transformer score is evaluated in a separate lane. The live dashboard gateway still uses its bundled heuristic until a serving integration is added.",
         ],
     }
 
@@ -386,6 +406,9 @@ def main() -> None:
     parser.add_argument("--label-column", default="is_attack")
     parser.add_argument("--group-column", required=True, help="Application/source/family grouping key; all rows in a group stay in one split")
     parser.add_argument("--category-column", default="category", help="Per-category analysis; optional if column is absent")
+    parser.add_argument("--fingerprint-column", help="Optional canonical SHA-256 column precomputed by trusted preparation")
+    parser.add_argument("--fixed-test-split", action="store_true", help="Treat the input CSV as the complete held-out test partition produced by a separate reproducible splitter")
+    parser.add_argument("--split-manifest", type=Path, help="Optional preprocessing split manifest included in the report")
     parser.add_argument("--model-score-column", help="Optional precomputed external model probability column")
     parser.add_argument("--model-scores-csv", type=Path, help="Optional sidecar with request_sha256,model_score columns (for train_transformer.py output)")
     parser.add_argument("--baseline-scores", action="append", default=[], metavar="NAME=CSV", help="Optional external WAF sidecar with request_sha256,prediction columns; repeat for multiple baselines")

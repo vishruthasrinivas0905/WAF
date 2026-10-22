@@ -11,7 +11,7 @@ Features:
 2. Uses target 'is_attack' (0=Benign, 1=Malicious).
 3. Evaluates ROC-AUC, PR-AUC, F1, FPR, FNR on validation set.
 4. Tunes classification threshold on validation set (NOT test set).
-5. Saves the best Hugging Face checkpoint, test-only hash-keyed scores, and a
+5. Saves the best Hugging Face checkpoint, test-only fingerprint-keyed scores, and a
    training/provenance manifest. ONNX export is not implemented here.
 """
 
@@ -27,20 +27,25 @@ import platform
 import random
 from pathlib import Path
 
+# Full HTTP request bodies in licensed corpora can exceed csv's 128 KiB default.
+csv.field_size_limit(2**31 - 1)
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Transformer WAF Model")
     parser.add_argument("--data_dir", type=str, default=r"DATASETS\FINAL_DATASET", help="Path to FINAL_DATASET")
     parser.add_argument("--output_dir", type=str, default=r"models\transformer_waf", help="Output directory for model")
     parser.add_argument("--model_name", type=str, default="distilbert-base-uncased", help="Base pretrained model")
+    parser.add_argument("--model_revision", type=str, default=None, help="Optional exact Hugging Face revision for reproducible base weights")
     parser.add_argument("--max_length", type=int, default=256, help="Maximum token sequence length")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for training reproducibility")
     parser.add_argument("--subsample", type=int, default=None, help="Optional subsample limit for quick dry run")
+    parser.add_argument("--train_per_class", type=int, default=None, help="Optional seeded reservoir sample cap per class for CPU constrained training; validation and test remain complete")
     return parser.parse_args()
 
-def clean_request(text: str) -> str:
+def clean_request(text: str, max_chars: int = 8192) -> str:
     """Strips trailing benchmark metadata artifacts."""
     import re
     if not text:
@@ -51,24 +56,41 @@ def clean_request(text: str) -> str:
         text,
         flags=re.IGNORECASE | re.DOTALL
     )
-    return cleaned.strip()
+    # Tokenizer truncation does not prevent scanning an arbitrarily large
+    # request body first. Bound raw text before tokenization; sequence length
+    # remains the final token-level bound.
+    return cleaned.strip()[:max_chars]
 
-def load_split(filepath: str, max_samples=None):
-    texts, labels = [], []
+def load_split(filepath: str, max_samples=None, max_per_class=None, seed=42, max_chars=8192):
+    selected = {0: [], 1: []}
+    seen_by_class = {0: 0, 1: 0}
+    rng = random.Random(seed)
     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
         reader = csv.DictReader(f)
         for i, row in enumerate(reader):
             if max_samples and i >= max_samples:
                 break
-            req = clean_request(row.get('request', ''))
+            req = clean_request(row.get('request', ''), max_chars=max_chars)
             # Use 'is_attack' column (0 or 1)
             raw_lbl = row.get('is_attack', '').strip()
             if not raw_lbl:
                 raw_lbl = '0' if row.get('label', '').strip().upper() == 'BENIGN' else '1'
             lbl = int(raw_lbl) if raw_lbl in ('0', '1') else 1
-            texts.append(req)
-            labels.append(lbl)
-    return texts, labels
+            sample = (req, lbl, (row.get('request_sha256') or '').strip())
+            if max_per_class is None:
+                selected[lbl].append(sample)
+                continue
+            seen_by_class[lbl] += 1
+            reservoir = selected[lbl]
+            if len(reservoir) < max_per_class:
+                reservoir.append(sample)
+            else:
+                replacement = rng.randrange(seen_by_class[lbl])
+                if replacement < max_per_class:
+                    reservoir[replacement] = sample
+    samples = selected[0] + selected[1]
+    rng.shuffle(samples)
+    return ([sample[0] for sample in samples], [sample[1] for sample in samples], [sample[2] for sample in samples])
 
 def main():
     args = parse_args()
@@ -110,9 +132,10 @@ def main():
             sys.exit(1)
 
     print("\nLoading and cleaning splits (stripping parser artifacts)...")
-    train_texts, train_labels = load_split(train_path, args.subsample)
-    val_texts, val_labels = load_split(val_path, args.subsample // 4 if args.subsample else None)
-    test_texts, test_labels = load_split(test_path, args.subsample // 4 if args.subsample else None)
+    max_chars = max(512, args.max_length * 32)
+    train_texts, train_labels, _ = load_split(train_path, args.subsample, args.train_per_class, args.seed, max_chars)
+    val_texts, val_labels, _ = load_split(val_path, args.subsample // 4 if args.subsample else None, seed=args.seed + 1, max_chars=max_chars)
+    test_texts, test_labels, test_request_hashes = load_split(test_path, args.subsample // 4 if args.subsample else None, seed=args.seed + 2, max_chars=max_chars)
 
     print(f"Train records: {len(train_texts):,} (Malicious: {sum(train_labels):,}, Benign: {len(train_labels)-sum(train_labels):,})")
     print(f"Val records:   {len(val_texts):,} (Malicious: {sum(val_labels):,}, Benign: {len(val_labels)-sum(val_labels):,})")
@@ -123,7 +146,7 @@ def main():
         raise ValueError("Test split must contain at least one labeled request.")
 
     print(f"\nInitializing tokenizer: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, revision=args.model_revision)
 
     class HTTPDataset(Dataset):
         def __init__(self, texts, labels, tokenizer, max_len):
@@ -158,7 +181,7 @@ def main():
     test_loader = DataLoader(test_ds, batch_size=args.batch_size * 2, shuffle=False)
 
     print(f"Initializing model: {args.model_name} (num_labels=2)")
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_name, num_labels=2)
+    model = AutoModelForSequenceClassification.from_pretrained(args.model_name, revision=args.model_revision, num_labels=2)
     model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
@@ -188,7 +211,7 @@ def main():
             scheduler.step()
 
             total_loss += loss.item()
-            if (step + 1) % 250 == 0 or (step + 1) == len(train_loader):
+            if (step + 1) % 50 == 0 or (step + 1) == len(train_loader):
                 elapsed = time.time() - start_time
                 print(f"Epoch {epoch}/{args.epochs} | Step {step+1}/{len(train_loader)} | Loss: {total_loss/(step+1):.4f} | Elapsed: {elapsed:.1f}s")
 
@@ -272,6 +295,7 @@ def main():
 
     metrics_report = {
         "model_name": args.model_name,
+        "model_revision": args.model_revision,
         "best_threshold": best_thresh,
         "test_f1": round(t_f1, 4),
         "test_precision": round(t_prec, 4),
@@ -287,19 +311,19 @@ def main():
     with open(report_path, "w") as f:
         json.dump(metrics_report, f, indent=2)
 
-    # Emit test-only scores keyed by the same canonical-request hash used by
-    # evaluate_dataset.py so external scores can be joined without payload logs.
+    # Emit test-only scores keyed by the preparation fingerprint carried in
+    # each split so external scores can be joined without payload logs.
     repo_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_root))
-    from waf.normalization.canonicalizer import Canonicalizer
-    canonicalizer = Canonicalizer()
     score_path = Path(args.output_dir) / "test_model_scores.csv"
     with score_path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=["request_sha256", "model_score"])
         writer.writeheader()
-        for request_text, probability in zip(test_texts, test_probs):
-            canonical = canonicalizer.parse_raw_http_request(request_text)["canonical_text"]
-            request_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        for request_text, request_hash, probability in zip(test_texts, test_request_hashes, test_probs):
+            if not request_hash:
+                from waf.normalization.canonicalizer import Canonicalizer
+                canonical = Canonicalizer().parse_raw_http_request(request_text)["canonical_text"]
+                request_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
             writer.writerow({"request_sha256": request_hash, "model_score": probability})
 
     source_hashes = {}
@@ -320,6 +344,8 @@ def main():
         "max_length": args.max_length,
         "batch_size": args.batch_size,
         "epochs_requested": args.epochs,
+        "train_per_class_cap": args.train_per_class,
+        "train_rows_used": len(train_texts),
         "best_epoch_by_validation_f1": best_epoch,
         "learning_rate": args.learning_rate,
         "selected_threshold_from_validation": best_thresh,
