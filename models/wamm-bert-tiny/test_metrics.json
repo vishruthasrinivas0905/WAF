@@ -1,0 +1,17 @@
+{
+  "model_name": "google/bert_uncased_L-2_H-128_A-2",
+  "best_threshold": 0.5,
+  "test_f1": 0.8761,
+  "test_precision": 0.9418,
+  "test_recall": 0.8189,
+  "test_roc_auc": 0.9323,
+  "test_fpr": 0.0876,
+  "test_fnr": 0.1811,
+  "confusion_matrix": {
+    "TN": 10973,
+    "FP": 1053,
+    "FN": 3769,
+    "TP": 17045
+  },
+  "total_test_samples": 32840
+}

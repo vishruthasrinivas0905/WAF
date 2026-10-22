@@ -21,5 +21,7 @@ htmlcov/
 bun.lock
 private-data/
 private-model/
-models/
+models/*
+!models/wamm-bert-tiny/
+!models/wamm-bert-tiny/**
 evaluation_results/

@@ -1,6 +1,6 @@
 # AppAware-WAF: Application-Aware Web Application Firewall Prototype
 
-An academic prototype for request canonicalization, handwritten attack signatures, heuristic risk scoring, application-profile demonstrations, and a configurable HTTP gateway. It is not a production-validated WAF. The bundled score engine is a lexical/entropy heuristic; this repository does not contain trained Transformer weights or source dataset files.
+An academic prototype for request canonicalization, handwritten attack signatures, heuristic risk scoring, application-profile demonstrations, and a configurable HTTP gateway. It is not a production-validated WAF. The live gateway still uses the lexical/entropy heuristic; a separately trained BERT-Tiny benchmark checkpoint and evaluation report are included. The licensed WAMM source dataset is not bundled.
 
 The `/proxy/*` route returns a clearly labeled mock response when `UPSTREAM_URL` is unset. Set `UPSTREAM_URL` to an explicitly trusted HTTP(S) origin to enable proxying. Management APIs require `WAF_ADMIN_TOKEN` in production. See [DEPLOYMENT.md](DEPLOYMENT.md) and [research/PUBLICATION_READINESS.md](research/PUBLICATION_READINESS.md).
 
@@ -15,9 +15,9 @@ The `/proxy/*` route returns a clearly labeled mock response when `UPSTREAM_URL`
 | Additional score | Lexical/entropy heuristic; not a trained neural model or calibrated probability |
 | Application profile | In-memory synthetic sample adaptation for UI demonstration |
 | Gateway | WAF-enforced mock mode by default; configured single-origin proxy when `UPSTREAM_URL` is set |
-| Evaluation | Small handcrafted smoke corpus plus a group-held-out CSV evaluation runner |
+| Evaluation | Handcrafted smoke corpus plus WAMM DS-Augmented-v2 request-level holdout report |
 
-Earlier drafts contained dataset-scale scores that cannot be reproduced from this repository because the cited datasets and model checkpoint are absent. Those figures have been removed from the live interface and should not be cited as results.
+The WAMM results are reproducible at the request-level using the pinned, licensed source corpus and preparation scripts. They do not establish cross-application generalization or production performance; see [the results and limitations](research/WAMM_BERT_TINY_RESULTS.md).
 
 ---
 
@@ -74,31 +74,27 @@ Earlier drafts contained dataset-scale scores that cannot be reproduced from thi
 
 ## 3. Reproducible Dataset Evaluation
 
-No licensed research dataset or trained checkpoint is included. Start with [the dataset manifest template](research/dataset_manifest.example.json), fill in the source, license, retrieval date, source hash, label method, group field, and model provenance, then evaluate a local CSV without committing licensed data:
+The BERT-Tiny checkpoint is included at `models/wamm-bert-tiny/`; source and training details are in its model card. The raw dataset stays outside Git. Reproduce the current WAMM benchmark from the pinned CC BY 4.0 source:
 
 ```powershell
-python scripts/evaluate_dataset.py .\private-data\requests.csv --group-column application --category-column category
+New-Item -ItemType Directory -Force private-data | Out-Null
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/CyShield-Security-R-D/WAMM-Dataset-Repository/2783eab560c4355f5976a57fc2e97a2e6c5c79a1/DS_Augmented_v2.db.xz" -OutFile "private-data/DS_Augmented_v2.db.xz"
+Get-FileHash private-data/DS_Augmented_v2.db.xz -Algorithm SHA256
+python scripts/prepare_wamm_dataset.py private-data/DS_Augmented_v2.db.xz private-data/wamm.csv
+python scripts/split_wamm_dataset.py private-data/wamm.csv --output-dir private-data/splits --seed 42
 ```
 
-Create canonical-deduplicated train/validation/test CSVs with groups kept intact:
+Train and run the fixed held-out comparison:
 
 ```powershell
-python scripts/create_group_splits.py .\private-data\requests.csv --group-column application --output-dir .\private-data\splits
+python -m pip install torch transformers scikit-learn accelerate
+New-Item -ItemType Directory -Force private-model | Out-Null
+$env:HF_HOME = (Resolve-Path private-model).Path + '\hf-cache'
+python scripts/train_transformer.py --data_dir private-data/splits --output_dir private-model/transformer-waf --model_name google/bert_uncased_L-2_H-128_A-2 --model_revision 30b0a37ccaaa32f332884b96992754e246e48c5f --max_length 128 --batch_size 32 --epochs 1 --learning_rate 2e-5 --seed 42 --train_per_class 2000
+python scripts/evaluate_dataset.py private-data/splits/transformer_test.csv --request-column request --label-column is_attack --group-column group --category-column category --fingerprint-column request_sha256 --fixed-test-split --split-manifest private-data/splits/split_manifest.json --model-scores-csv private-model/transformer-waf/test_model_scores.csv --model-threshold 0.5 --bootstrap-iterations 500 --seed 42 --output-dir research/wamm_v2_evaluation
 ```
 
-The split command writes `transformer_train.csv`, `transformer_val.csv`, `transformer_test.csv`, a hash-based `split_assignments.csv`, and a provenance summary. Train using the existing optional training script and supplied dependencies/data:
-
-```powershell
-python scripts/train_transformer.py --data_dir .\private-data\splits --output_dir .\private-model
-```
-
-For group-held-out evaluation, rerun with the same source CSV, group column, sizes, and seed:
-
-```powershell
-python scripts/evaluate_dataset.py .\private-data\requests.csv --group-column application --category-column category --model-scores-csv .\private-model\test_model_scores.csv --model-threshold 0.50
-```
-
-The evaluator uses the same deterministic split procedure, compares rules-only, heuristic-only, and hybrid decisions, reports per-category results, and calculates cluster-bootstrap confidence intervals over test groups. Replace `0.50` with the threshold selected on validation data. `train_transformer.py` writes a test-only model-score sidecar keyed by canonical request SHA-256. The evaluator does not train a Transformer, and its heuristic lane is not a model result. See [PUBLICATION_READINESS.md](research/PUBLICATION_READINESS.md) for requirements and limits.
+The saved results include rules-only, heuristic-only, trained-model-only, and hybrid lanes with per-category results and 95% request-level bootstrap intervals. This dataset has no reliable application-family field, so its random request-level split is not a cross-site holdout. The live Node gateway still uses the heuristic; the included model is benchmark-only. See [dataset provenance](research/DATASET_PROVENANCE.md), [benchmark results](research/WAMM_BERT_TINY_RESULTS.md), and [publication readiness](research/PUBLICATION_READINESS.md) for exact limits.
 
 ### Compare an OWASP CRS baseline
 
