@@ -10,7 +10,7 @@ export interface SecurityEvent {
   confidence: number;
   signals: {
     deterministicScore: number;
-    transformerScore: number;
+    heuristicScore: number;
     profileScore: number;
   };
   matchedRules: {
@@ -31,7 +31,7 @@ export interface SecurityEvent {
     totalMs: number;
     canonicalizationMs: number;
     rulesMs: number;
-    transformerMs: number;
+    heuristicMs: number;
     policyMs: number;
   };
 }

@@ -178,7 +178,7 @@ class Canonicalizer:
         # Parse query params
         query_params = urllib.parse.parse_qs(decoded_query, keep_blank_values=True)
 
-        # Build clean representation for Transformer and Rules
+        # Build clean representation for the heuristic scorer and deterministic rules
         canonical_representation = f"{method} {canonical_path}"
         if decoded_query:
             canonical_representation += f"?{decoded_query}"

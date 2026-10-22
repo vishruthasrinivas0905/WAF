@@ -10,8 +10,8 @@ Run on your local Windows machine:
 Features:
 1. Interactive manual attack testing for GET, POST, PUT, DELETE.
 2. Automated 20-vector test matrix verification across SQLi, XSS, RCE, Traversal, and Benign.
-3. Loads your trained Transformer model ('models/transformer_waf') if PyTorch is available,
-   with automatic fallback to token attention heuristics if torch is not installed.
+3. Optionally loads a user-supplied Transformer checkpoint from 'models/transformer_waf'
+   if the checkpoint and PyTorch dependencies are present; otherwise uses the bundled heuristic.
 4. Explains step-by-step why a request was ALLOWED or BLOCKED.
 """
 
@@ -95,7 +95,7 @@ def inspect_single(method: str, path: str, headers_dict: dict, body: str):
     else:
         print("     No deterministic signatures matched.")
 
-    print(f"  3. Transformer Score: P(Attack) = {event['signals']['transformer_score'] * 100:.1f}%")
+    print(f"  3. Heuristic Score (not model probability): {event['signals']['heuristic_score'] * 100:.1f}%")
     print(f"  4. App Profile Match: Anomaly = {event['signals']['profile_score']:.2f} (Known Route: {event['profile_context']['is_known_route']})")
 
     if event['decision'] == "BLOCK":

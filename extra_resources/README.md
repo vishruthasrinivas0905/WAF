@@ -1,6 +1,6 @@
 # Extra Resources & Supplementary Research Assets
 
-This directory contains research benchmarks, empirical experiments, dataset integrity audit utilities, and diagnostic tools developed for the **AppAware-WAF** evaluation and research paper.
+This directory contains legacy exploratory scripts and result artifacts. The raw datasets and trained checkpoint referenced by some scripts are not included. Treat historical metrics as unverified until reproduced with licensed data and a recorded run manifest. The standalone robustness script uses a small handcrafted payload list and is a regression demonstration, not evidence of real-world detection performance.
 
 ---
 
@@ -11,18 +11,22 @@ extra_resources/
 ├── README.md                      # This directory guide
 ├── experiments/                   # Academic empirical experiments
 │   ├── adaptation/                # Experiment D: Few-Shot Application Adaptation
-│   │   └── run_adaptation.py      # Benchmark evaluating FPR reduction across sample budgets (0, 100, 500, 1,000)
+│   │   └── run_adaptation.py      # Legacy exploratory demo; not validated evidence
 │   └── robustness/                # Experiment E: Canonicalization & Evasion Benchmark
-│       ├── run_robustness.py      # 19-vector obfuscation suite (URL, double-URL, hex, HTML entities, etc.)
-│       └── robustness_results.json# Serialized experimental benchmark outputs
+│       ├── run_robustness.py      # Small handcrafted canonicalization regression suite
+│       └── robustness_results.json# Historical output; rerun before citing
 └── scripts/                       # Dataset & Model Diagnostic Utilities
-    ├── inspect_dataset.py         # Leak audit & distribution analysis across 183,045 records
+    ├── inspect_dataset.py         # Audit tool for a user-supplied dataset directory
     └── diagnose_model.py          # PyTorch / HuggingFace model evaluation on test splits
 ```
 
 ---
 
-## 1. Experiments
+## Evidence limits
+
+The earlier numeric claims in these files are not a substitute for a reproducible study package. This repository does not include the underlying split CSVs or model checkpoint. Use `scripts/create_group_splits.py` and `scripts/evaluate_dataset.py` for new measurements, and complete `research/dataset_manifest.example.json` with data provenance first.
+
+## 1. Exploratory scripts
 
 ### `experiments/adaptation/run_adaptation.py`
 Evaluates the core thesis question:
@@ -33,9 +37,7 @@ Evaluates the core thesis question:
 python extra_resources/experiments/adaptation/run_adaptation.py
 ```
 
-**Key Metric Observed:**
-* Unadapted FPR (0 samples): **14.20%**
-* Adapted FPR (1,000 samples): **2.10%** (**-85.2% false positive reduction**)
+This script requires an external dataset directory and currently uses the prototype profile engine with synthetic adaptation samples. Its output is not a validated application-adaptation result.
 
 ### `experiments/robustness/run_robustness.py`
 Tests defensive resilience against evasion transformations, including:
@@ -52,19 +54,17 @@ Tests defensive resilience against evasion transformations, including:
 python extra_resources/experiments/robustness/run_robustness.py
 ```
 
-**Key Metric Observed:**
-* Raw direct inspection: **63.16% detection rate**
-* Canonicalized inspection: **100.00% detection rate (+36.84% improvement)**
+Rerunning provides a deterministic smoke comparison on its handcrafted payload list. Report the sample count and scope; do not generalize it to all evasions or production traffic.
 
 ---
 
 ## 2. Diagnostic & Audit Scripts
 
 ### `scripts/inspect_dataset.py`
-Runs a cryptographic and statistical verification of the raw 183,045 records:
+Runs legacy checks against a user-supplied dataset directory:
 * Row count verification (`transformer_train.csv`, `transformer_val.csv`, `transformer_test.csv`)
 * Label schema consistency check (`0` / `1` vs `BENIGN` / `1`)
-* Train-test SHA-256 string overlap check (**verified 0.00% leakage**)
+* Train-test exact-string overlap check (not a group-disjoint leakage audit)
 * Parser artifact delimiter detection (`End - Id:`, `Start - Id:`, `class: Valid`)
 
 **Execution:**
@@ -73,7 +73,7 @@ python extra_resources/scripts/inspect_dataset.py --dataset-dir "DATASETS/FINAL_
 ```
 
 ### `scripts/diagnose_model.py`
-Loads fine-tuned weights (`models/transformer_waf`) and runs automated batch inference:
+Can load user-supplied fine-tuned weights (`models/transformer_waf`) for batch inference; no such checkpoint is included:
 * Produces confusion matrix ($TN$, $FP$, $FN$, $TP$)
 * Generates precision, recall, F1, and ROC-AUC
 * Measures average inference latency per request

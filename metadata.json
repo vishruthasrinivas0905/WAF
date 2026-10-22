@@ -1,6 +1,6 @@
 {
-  "name": "AppAware-WAF: Transformer Web Application Firewall",
-  "description": "Production-oriented, application-aware Transformer WAF with few-shot adaptation, hybrid deterministic rules, reverse proxy gateway, and security evaluation.",
+  "name": "AppAware-WAF: Application-Aware WAF Prototype",
+  "description": "Academic prototype with HTTP canonicalization, handwritten security signatures, heuristic scoring, configurable gateway demo, and grouped evaluation tooling. No trained model or research dataset is bundled.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

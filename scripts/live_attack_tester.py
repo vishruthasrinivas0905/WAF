@@ -7,7 +7,7 @@ Tests the WAF across ALL HTTP Methods (GET, POST, PUT, DELETE)
 and ALL major Attack Categories (SQLi, XSS, RCE, Path Traversal, Benign).
 
 Can run in two modes:
-1. PIPELINE MODE: Evaluates natively using the Python WAF modules & DistilBERT model.
+1. PIPELINE MODE: Evaluates natively using the Python WAF modules and bundled heuristic scorer.
 2. LIVE GATEWAY MODE: Sends real HTTP network requests through the Reverse Proxy Gateway.
 """
 
