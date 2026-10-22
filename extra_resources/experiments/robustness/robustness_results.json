@@ -1,0 +1,217 @@
+{
+  "total_variations": 19,
+  "raw_detection_rate": 63.16,
+  "canonicalized_detection_rate": 100.0,
+  "improvement_pct": 36.84,
+  "detailed_cases": [
+    {
+      "category": "SQLI",
+      "variation": "RAW",
+      "payload": "SELECT * FROM users WHERE id = 1 UNION SELECT null",
+      "raw_score": 0.85,
+      "raw_detected": true,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "SQLI",
+      "variation": "DOUBLE_URL_ENCODED",
+      "payload": "SELECT%20*%20FROM%20users%20WHERE%20id%20=%201%20U",
+      "raw_score": 0.0,
+      "raw_detected": false,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": true,
+      "evaded_canon": false
+    },
+    {
+      "category": "SQLI",
+      "variation": "MIXED_CASE",
+      "payload": "sElEcT * fRoM users wHeRe id = 1 uNiOn sElEcT null",
+      "raw_score": 0.85,
+      "raw_detected": true,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "SQLI",
+      "variation": "SQL_COMMENT_INJECTION",
+      "payload": "SELECT/**//*!32302**/id/**/FROM/**/users/**/WHERE/",
+      "raw_score": 0.85,
+      "raw_detected": true,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "SQLI",
+      "variation": "NULL_BYTE_POISONING",
+      "payload": "SELECT * FROM users WHERE id = 1%00 UNION SELECT n",
+      "raw_score": 0.85,
+      "raw_detected": true,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "XSS",
+      "variation": "RAW",
+      "payload": "<script>alert(1)</script>",
+      "raw_score": 0.85,
+      "raw_detected": true,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "XSS",
+      "variation": "MIXED_CASE",
+      "payload": "<sCrIpT>alert(1)</ScRiPt>",
+      "raw_score": 0.85,
+      "raw_detected": true,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "XSS",
+      "variation": "DOUBLE_URL_ENCODED",
+      "payload": "%253Cscript%253Ealert(1)%253C%252Fscript%253E",
+      "raw_score": 0.0,
+      "raw_detected": false,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": true,
+      "evaded_canon": false
+    },
+    {
+      "category": "XSS",
+      "variation": "EVENT_HANDLER_SPACING",
+      "payload": "<img src=x onerror  =  alert(document.cookie)>",
+      "raw_score": 0.65,
+      "raw_detected": false,
+      "canon_score": 0.65,
+      "canon_detected": true,
+      "evaded_raw": true,
+      "evaded_canon": false
+    },
+    {
+      "category": "XSS",
+      "variation": "JAVASCRIPT_URI_ENCODED",
+      "payload": "javascript:%61%6c%65%72%74(1)",
+      "raw_score": 0.65,
+      "raw_detected": false,
+      "canon_score": 0.65,
+      "canon_detected": true,
+      "evaded_raw": true,
+      "evaded_canon": false
+    },
+    {
+      "category": "TRAVERSAL",
+      "variation": "RAW",
+      "payload": "/download?file=../../../../etc/passwd",
+      "raw_score": 0.9,
+      "raw_detected": true,
+      "canon_score": 0.9,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "TRAVERSAL",
+      "variation": "URL_ENCODED_SLASH",
+      "payload": "/download?file=..%2f..%2f..%2f..%2fetc%2fpasswd",
+      "raw_score": 0.65,
+      "raw_detected": false,
+      "canon_score": 0.9,
+      "canon_detected": true,
+      "evaded_raw": true,
+      "evaded_canon": false
+    },
+    {
+      "category": "TRAVERSAL",
+      "variation": "DOUBLE_URL_ENCODED",
+      "payload": "/download?file=%252e%252e%252f%252e%252e%252fetc%2",
+      "raw_score": 0.0,
+      "raw_detected": false,
+      "canon_score": 0.9,
+      "canon_detected": true,
+      "evaded_raw": true,
+      "evaded_canon": false
+    },
+    {
+      "category": "TRAVERSAL",
+      "variation": "REDUNDANT_SLASHES",
+      "payload": "/download?file=..//..//..//etc//passwd",
+      "raw_score": 0.65,
+      "raw_detected": false,
+      "canon_score": 0.65,
+      "canon_detected": true,
+      "evaded_raw": true,
+      "evaded_canon": false
+    },
+    {
+      "category": "TRAVERSAL",
+      "variation": "CURRENT_DIR_INJECTION",
+      "payload": "/download?file=./../.././etc/passwd",
+      "raw_score": 0.9,
+      "raw_detected": true,
+      "canon_score": 0.9,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "RCE",
+      "variation": "RAW",
+      "payload": "; cat /etc/passwd",
+      "raw_score": 0.9,
+      "raw_detected": true,
+      "canon_score": 0.9,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "RCE",
+      "variation": "PIPE_CHAINING",
+      "payload": "| whoami",
+      "raw_score": 0.85,
+      "raw_detected": true,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "RCE",
+      "variation": "SUBCOMMAND_SUBSTITUTION",
+      "payload": "$(whoami)",
+      "raw_score": 0.85,
+      "raw_detected": true,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    },
+    {
+      "category": "RCE",
+      "variation": "BACKTICK_EXEC",
+      "payload": "`id`",
+      "raw_score": 0.85,
+      "raw_detected": true,
+      "canon_score": 0.85,
+      "canon_detected": true,
+      "evaded_raw": false,
+      "evaded_canon": false
+    }
+  ]
+}
