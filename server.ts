@@ -1,5 +1,7 @@
 import "dotenv/config";
 import express, { Request, Response, NextFunction } from "express";
+import bcrypt from "bcryptjs";
+import session from "express-session";
 import path from "path";
 import fs from "fs";
 import { execFile } from "child_process";
@@ -14,6 +16,8 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const adminToken = process.env.WAF_ADMIN_TOKEN?.trim() || "";
+const sessionSecret = process.env.SESSION_SECRET?.trim() || "";
+const secureSessionCookie = process.env.SESSION_COOKIE_SECURE === "true" || (process.env.SESSION_COOKIE_SECURE !== "false" && process.env.NODE_ENV === "production");
 const configuredMode = (process.env.WAF_MODE || "ENFORCING").toUpperCase();
 if (!["ENFORCING", "MONITORING", "SIMULATION"].includes(configuredMode)) {
   throw new Error("WAF_MODE must be ENFORCING, MONITORING, or SIMULATION.");
@@ -32,36 +36,145 @@ else app.set("trust proxy", false);
 if (process.env.NODE_ENV === "production" && adminToken.length < 32) {
   throw new Error("Set WAF_ADMIN_TOKEN to a random value of at least 32 characters in production.");
 }
+if (process.env.NODE_ENV === "production" && sessionSecret.length < 32) {
+  throw new Error("Set SESSION_SECRET to a random value of at least 32 characters in production.");
+}
 
 const upstreamUrl = process.env.UPSTREAM_URL ? new URL(process.env.UPSTREAM_URL) : null;
 if (upstreamUrl && (!['http:', 'https:'].includes(upstreamUrl.protocol) || upstreamUrl.username || upstreamUrl.password || upstreamUrl.pathname !== "/" || upstreamUrl.search || upstreamUrl.hash)) {
   throw new Error("UPSTREAM_URL must be an http(s) origin without credentials, path, query, or fragment.");
 }
 
+
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  if (!adminToken) {
-    if (process.env.NODE_ENV === "production") {
-      res.status(503).json({ error: "Management API is disabled until WAF_ADMIN_TOKEN is configured." });
-      return;
-    }
+  // Allow a user who has logged in through the browser.
+  if ((req.session as any)?.authenticated === true) {
     next();
     return;
   }
 
-  const supplied = req.header("authorization")?.replace(/^Bearer\s+/i, "") || "";
-  const expectedBytes = Buffer.from(adminToken);
-  const suppliedBytes = Buffer.from(supplied);
-  if (expectedBytes.length !== suppliedBytes.length || !timingSafeEqual(expectedBytes, suppliedBytes)) {
-    res.status(401).json({ error: "Valid admin bearer token required." });
+  // Otherwise, preserve the existing WAF admin-token authentication.
+  if (!adminToken) {
+    if (process.env.NODE_ENV === "production") {
+      res.status(503).json({
+        error: "Management API is disabled until WAF_ADMIN_TOKEN is configured.",
+      });
+      return;
+    }
+
+    next();
     return;
   }
+
+  const supplied =
+    req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+
+  const expectedBytes = Buffer.from(adminToken);
+  const suppliedBytes = Buffer.from(supplied);
+
+  if (
+    expectedBytes.length !== suppliedBytes.length ||
+    !timingSafeEqual(expectedBytes, suppliedBytes)
+  ) {
+    res.status(401).json({
+      error: "Login session or valid admin bearer token required.",
+    });
+    return;
+  }
+
   next();
 }
+
 
 // Body parser
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true, limit: "5mb" }));
 app.use(express.text({ type: ["text/*", "application/xml", "application/octet-stream"], limit: "5mb" }));
+app.use(
+  session({
+    secret: sessionSecret || "development-only-secret-change-me",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: secureSessionCookie,
+      maxAge: 30 * 60 * 1000,
+    },
+  }),
+);
+// Authentication routes
+
+app.post("/api/auth/login", async (req: Request, res: Response) => {
+  const { username, password } = req.body ?? {};
+
+  const configuredUsername = process.env.AUTH_USERNAME;
+  const configuredHash = process.env.AUTH_PASSWORD_HASH;
+
+  if (
+    !configuredUsername ||
+    !configuredHash ||
+    configuredHash.includes("replace-with")
+  ) {
+    res.status(503).json({ error: "Login credentials are not configured." });
+    return;
+  }
+
+  if (typeof username !== "string" || typeof password !== "string") {
+    res.status(400).json({ error: "Username and password are required." });
+    return;
+  }
+
+  try {
+    const passwordMatches = await bcrypt.compare(password, configuredHash);
+
+    if (username !== configuredUsername || !passwordMatches) {
+      res.status(401).json({ error: "Invalid username or password." });
+      return;
+    }
+
+    req.session.regenerate((error) => {
+      if (error) {
+        res.status(500).json({ error: "Could not create login session." });
+        return;
+      }
+
+      (req.session as any).authenticated = true;
+
+      req.session.save((saveError) => {
+        if (saveError) {
+          res.status(500).json({ error: "Could not save login session." });
+          return;
+        }
+
+        res.json({ authenticated: true, username: configuredUsername });
+      });
+    });
+  } catch {
+    res.status(500).json({ error: "Login could not be completed." });
+  }
+});
+
+app.get("/api/auth/me", (req: Request, res: Response) => {
+  const authenticated = (req.session as any).authenticated === true;
+
+  res.json({
+    authenticated,
+    username: authenticated ? process.env.AUTH_USERNAME : null,
+  });
+});
+
+app.post("/api/auth/logout", (req: Request, res: Response) => {
+  req.session.destroy((error) => {
+    if (error) {
+      res.status(500).json({ error: "Could not end the session." });
+      return;
+    }
+
+    res.clearCookie("connect.sid");
+    res.json({ authenticated: false });
+  });
+});
 app.use("/api/waf", requireAdmin);
 
 // Initialize WAF Pipeline

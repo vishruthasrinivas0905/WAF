@@ -1,6 +1,6 @@
 # Local Deployment and Gateway Demo
 
-This repository is an academic prototype. The score engine is a handcrafted heuristic and the default `/proxy/*` behavior is a clearly labeled mock response. Set a single trusted `UPSTREAM_URL` to enable real HTTP proxying. Production management endpoints require an admin bearer token.
+This repository is an academic prototype. The score engine is a handcrafted heuristic and the default /proxy/* behavior is a clearly labeled mock response. Set a single trusted UPSTREAM_URL to enable real HTTP proxying. Production dashboard access uses a signed-in session; direct management API clients use WAF_ADMIN_TOKEN.
 
 ## Local dashboard
 
@@ -19,18 +19,22 @@ Set these environment values through a secret manager or an untracked `.env` fil
 NODE_ENV=production
 PORT=3000
 WAF_MODE=ENFORCING
+AUTH_USERNAME=admin
+AUTH_PASSWORD_HASH=<bcrypt hash of the dashboard password>
+SESSION_SECRET=<random secret, at least 32 characters>
+SESSION_COOKIE_SECURE=true
 UPSTREAM_URL=https://your-approved-upstream.example
 WAF_ADMIN_TOKEN=<random secret, at least 32 characters>
 WAF_TRUST_PROXY=<optional trusted proxy IPs/CIDRs, comma-separated>
 ```
 
-`UPSTREAM_URL` must be an origin without credentials, path, query, or fragment. The gateway keeps requests on that origin, does not follow redirects, has a 10-second upstream timeout, and limits upstream response bodies to 10 MiB. Management APIs under `/api/waf` require `Authorization: Bearer <WAF_ADMIN_TOKEN>`. The UI's password field holds the key in page memory and sends it only to those APIs.
+Dashboard sign-in uses AUTH_USERNAME and a bcrypt password hash in AUTH_PASSWORD_HASH; set SESSION_SECRET to a long random value. A signed-in browser session authorizes dashboard management actions. WAF_ADMIN_TOKEN is for direct management API clients and is kept server-side by the dashboard. Do not put these values in frontend code.
 
 `WAF_TRUST_PROXY` must name only proxy addresses you control, for example `loopback,10.0.0.0/8`. Leave it unset when direct clients connect. Express ignores `X-Forwarded-For` unless the connecting proxy matches a configured trusted range. Never set this value to `true`.
 
 ## Docker Compose demo
 
-1. Create an untracked `.env` file with a random `WAF_ADMIN_TOKEN` at least 32 characters long.
+1. Create an untracked .env file with AUTH_USERNAME, a bcrypt AUTH_PASSWORD_HASH, a random SESSION_SECRET of at least 32 characters, and a random WAF_ADMIN_TOKEN of at least 32 characters.
 2. Compose pins the demo target to a versioned Juice Shop image tag. Record the image digest as well when archiving a publication run.
 3. Start the isolated demo:
 
@@ -38,7 +42,7 @@ WAF_TRUST_PROXY=<optional trusted proxy IPs/CIDRs, comma-separated>
 docker compose up --build
 ```
 
-The dashboard/gateway is exposed on `http://localhost:8080`. The WAF proxies to the Juice Shop service configured in Compose. The admin key must be entered in the dashboard for telemetry and management controls. Keep this intentionally vulnerable target isolated and do not expose it publicly.
+The dashboard/gateway is available on http://localhost:8080 and the port is bound to loopback. The local Compose demo uses a non-secure session cookie because it runs over HTTP; production defaults to secure cookies.
 
 ## Reproducible evaluation
 
