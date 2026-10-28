@@ -153,7 +153,7 @@ npm run dev
 Access the dashboard at `http://localhost:3000`:
 * **Gateway Console:** Manual request inspection and proxy/mock response.
 * **Evidence tabs:** State which results/artifacts are absent and link to the reproducible evaluation workflow.
-* **Management API key:** Enter the configured key in the browser UI when `WAF_ADMIN_TOKEN` is set.
+* Dashboard sign-in uses AUTH_USERNAME and the bcrypt hash in AUTH_PASSWORD_HASH; the signed-in session authorizes dashboard controls. WAF_ADMIN_TOKEN is configured server-side for direct API clients and is not entered into the dashboard.
 
 ---
 

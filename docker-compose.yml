@@ -9,13 +9,17 @@ services:
     container_name: appaware_waf_gateway
     restart: unless-stopped
     ports:
-      - "8080:3000"
+      - "127.0.0.1:8080:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
       WAF_MODE: ENFORCING
       UPSTREAM_URL: http://upstream-vulnerable-app:3000
       WAF_ADMIN_TOKEN: ${WAF_ADMIN_TOKEN:?Set WAF_ADMIN_TOKEN to a random secret of at least 32 characters}
+      AUTH_USERNAME: ${AUTH_USERNAME:?Set AUTH_USERNAME for dashboard login}
+      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:?Set AUTH_PASSWORD_HASH to a bcrypt password hash}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET to a random secret}
+      SESSION_COOKIE_SECURE: "false"
       WAF_TRUST_PROXY: ${WAF_TRUST_PROXY:-}
     depends_on:
       - upstream-vulnerable-app
