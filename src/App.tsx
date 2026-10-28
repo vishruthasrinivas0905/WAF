@@ -151,7 +151,9 @@ export default function App() {
   const sendRequest = async (event: React.FormEvent) => {
     event.preventDefault(); setBusy(true); setError(""); setResult(null);
     try {
-      const path = target.startsWith("/") ? target : `/${target}`;
+      const requestTarget = target.trim();
+      if (!requestTarget) throw new Error("Enter a path and query before sending the request.");
+      const path = requestTarget.startsWith("/") ? requestTarget : `/${requestTarget}`;
       const headers = new Headers(); if (body.trim()) headers.set("Content-Type", "application/json");
       const response = await fetch(`/proxy${path}`, { method, headers, body: body.trim() && !["GET", "HEAD"].includes(method) ? body : undefined });
       const raw = await response.text(); let responseBody: unknown = raw; try { responseBody = JSON.parse(raw); } catch { /* upstream response may be text */ }
@@ -332,7 +334,17 @@ export default function App() {
     );
   })}
 </div>
-            {method !== "GET" && <label className="block text-xs text-slate-400">Request body<textarea value={body} onChange={(e) => { setBody(e.target.value); setSelectedDemo(""); }} rows={4} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2.5 font-mono text-xs text-white" /></label>}
+            <div className="grid gap-3 sm:grid-cols-[8.5rem_1fr]">
+              <label className="block text-xs text-slate-400">Method
+                <select value={method} onChange={(e) => { setMethod(e.target.value); setSelectedDemo(""); setResult(null); }} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-white focus:border-indigo-400">
+                  {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((item) => <option key={item} value={item}>{item}</option>)}
+                </select>
+              </label>
+              <label className="block text-xs text-slate-400">Path and query
+                <input type="text" value={target} onChange={(e) => { setTarget(e.target.value); setSelectedDemo(""); setResult(null); }} placeholder="/api/products?category=books&page=1" autoComplete="off" spellCheck={false} required className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-3 font-mono text-xs text-white placeholder:text-slate-600 focus:border-indigo-400" />
+              </label>
+            </div>
+            {!['GET', 'HEAD'].includes(method) && <label className="block text-xs text-slate-400">Request body<textarea value={body} onChange={(e) => { setBody(e.target.value); setSelectedDemo(""); }} rows={4} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2.5 font-mono text-xs text-white" /></label>}
             <button disabled={busy} className="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"><Play className="h-4 w-4" />{busy ? "Inspecting request…" : "Send through the WAF gateway"}<ArrowRight className="h-4 w-4" /></button>
             <p className="text-[11px] text-slate-500">Without <code>UPSTREAM_URL</code>, allowed requests receive a labeled mock response and are not forwarded externally.</p>
           </form>
