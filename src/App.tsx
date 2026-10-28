@@ -515,6 +515,9 @@ function ResultPanel({
             <p className="mt-1 text-sm text-slate-300">
               HTTP {result.status} · {result.method}
             </p>
+            {attackType && <p className={`mt-2 inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${blocked ? "border-rose-300/30 bg-rose-500/15 text-rose-100" : "border-amber-300/30 bg-amber-500/10 text-amber-100"}`}>
+              Attack type: {attackType}
+            </p>}
           </div>
         </div>
 
@@ -531,11 +534,7 @@ function ResultPanel({
 
 <div className="mt-5 rounded-xl border border-slate-700/70 bg-slate-950/50 p-4">
   <p className="text-sm leading-6 text-slate-200">{explanation}</p>
-  <div className="mt-3 grid gap-3 sm:grid-cols-2">
-    {attackType && <div className="rounded-lg border border-rose-400/20 bg-rose-500/[0.06] p-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-rose-200">Attack type</p>
-      <p className="mt-1 text-sm font-semibold text-white">{attackType}</p>
-    </div>}
+  <div className="mt-3">
     <div className="rounded-lg border border-slate-700 bg-slate-950/70 p-3">
       <p className="text-xs font-semibold text-white">{blocked ? "Why did the WAF block it?" : "Why this decision?"}</p>
       <p className="mt-1 text-xs leading-5 text-slate-300">{details?.reason || decisionExplanation}</p>
