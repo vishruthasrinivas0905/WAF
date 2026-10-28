@@ -428,6 +428,15 @@ function ResultPanel({
 }) {
   const blocked = result.decision === "BLOCK";
   const monitored = result.decision === "MONITOR";
+  const attackTypeLabels: Record<string, string> = {
+    SQLI: "SQL injection",
+    XSS: "Cross-site scripting (XSS)",
+    RCE: "Remote code execution attempt",
+    TRAVERSAL: "Path traversal / file inclusion",
+    SCANNER: "Automated scanner probe",
+  };
+  const attackTypes = [...new Set((details?.matchedRules ?? []).map((rule) => attackTypeLabels[rule.category] || rule.category))];
+  const attackType = attackTypes.length ? attackTypes.join(", ") : blocked ? "High-risk request (heuristic)" : null;
   const decisionExplanation = blocked
   ? "The WAF blocked this request because it matched a security rule or reached the configured blocking threshold."
   : monitored
@@ -521,20 +530,17 @@ function ResultPanel({
 
 
 <div className="mt-5 rounded-xl border border-slate-700/70 bg-slate-950/50 p-4">
-  <p className="text-sm leading-6 text-slate-200">
-    {explanation}
-  </p>
-
-    {details?.reason && (
-    <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950/70 p-3">
-      <p className="text-xs font-semibold text-white">
-        Why this decision?
-      </p>
-      <p className="mt-1 text-xs leading-5 text-slate-300">
-        {details.reason}
-      </p>
+  <p className="text-sm leading-6 text-slate-200">{explanation}</p>
+  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+    {attackType && <div className="rounded-lg border border-rose-400/20 bg-rose-500/[0.06] p-3">
+      <p className="text-xs font-semibold uppercase tracking-wide text-rose-200">Attack type</p>
+      <p className="mt-1 text-sm font-semibold text-white">{attackType}</p>
+    </div>}
+    <div className="rounded-lg border border-slate-700 bg-slate-950/70 p-3">
+      <p className="text-xs font-semibold text-white">{blocked ? "Why did the WAF block it?" : "Why this decision?"}</p>
+      <p className="mt-1 text-xs leading-5 text-slate-300">{details?.reason || decisionExplanation}</p>
     </div>
-  )}
+  </div>
 </div>
 
 
@@ -575,6 +581,7 @@ function ResultPanel({
           <h3 className="text-sm font-semibold text-white">
             Matched security rules
           </h3>
+          <p className="mt-1 text-xs text-slate-400">These rule matches determined the detected attack type above.</p>
           <div className="mt-3 flex flex-wrap gap-2">
             {details.matchedRules.map((rule) => (
               <span
